@@ -3,6 +3,7 @@
 import bpy, bmesh, math, random, zlib
 from mathutils import Vector, Matrix
 from mathutils.bvhtree import BVHTree
+from .przygotowanie import fit_top_uv, unfold_uv, top_outline
 
 NAIL_MESH = "Deski_Gwozdz"
 
@@ -27,12 +28,47 @@ def triangulate_ngons(bm, faces):
         bmesh.ops.triangulate(bm, faces=ng, quad_method='BEAUTY', ngon_method='BEAUTY')
 
 
+# ---------------------------------------------------------------- UV przy drzazgach i pekniecach
+def top_uv(bm, L, p):
+    """liniowe UV wierzchu deski (uklad deski), liczone z wierzchu z dala od koncow"""
+    uvl = bm.loops.layers.uv.active
+    if uvl is None:
+        return None
+    z_top = max(v.co.z for v in bm.verts)
+    lim = L / 2 - min(p.splinter_depth, 0.25 * L) - 0.01
+    samples = [((lp.vert.co.x, lp.vert.co.y), tuple(lp[uvl].uv)) for f in bm.faces
+               if f.normal.z > 0.99 and all(v.co.z > z_top - 1e-5 and abs(v.co.x) < lim for v in f.verts)
+               for lp in f.loops]
+    uvf = fit_top_uv(samples)
+    return (uvl, uvf, z_top) if uvf else None
+
+
+def reuv(uv, faces):
+    """UV scian po zmianie ksztaltu: wierzch - rzut (tekstura na miejscu), boki / czola - zagiecie wierzchu"""
+    if uv:
+        uvl, uvf, z_top = uv
+        ident = lambda v, is_dir: v.copy()
+        bm_faces = next((f for f in faces if f.is_valid), None)
+        tops = []
+        if bm_faces is not None:
+            # aktualny obrys wierzchu (po przesunieciu zebow / peknieciu)
+            seen, stack = set(), [f for f in faces if f.is_valid]
+            while stack:                               # sciany tych samych bryl (oba kawalki pekniecia)
+                f = stack.pop()
+                if f in seen:
+                    continue
+                seen.add(f); stack.extend(g for e in f.edges for g in e.link_faces)
+            tops = [f for f in seen if f.normal.z > 0.99 and all(v.co.z > z_top - 1e-4 for v in f.verts)]
+        unfold_uv([f for f in faces if f.is_valid], uvl, ident, uvf, z_top, top_outline(tops, ident))
+
+
 # ---------------------------------------------------------------- drzazgi na koncu deski
 def splinter_end(bm, sgn, L, W, T, rng, p):
     """poszarpany koniec deski: petla w glebokosci D, krawedzie czola podzielone na 'zeby',
     zeby cofniete (czasem jeden wystaje) - bez n-gonow (sciany > 4 wierzcholki triangulowane)"""
     D = min(p.splinter_depth, 0.25 * L)
     xe = sgn * L / 2
+    uv = top_uv(bm, L, p)                              # UV wierzchu sprzed wyrwania drzazg
     bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
                            plane_co=Vector((xe - sgn * D, 0, 0)), plane_no=Vector((1, 0, 0)))
     # wszystkie krawedzie w poprzek konca deski (wierzch, faza, czolo, spod) - rzedy od gory do dolu
@@ -72,6 +108,7 @@ def splinter_end(bm, sgn, L, W, T, rng, p):
             f = (v.co.z - zmin) / max(zmax - zmin, 1e-9)
             v.co.x += dx * (k_bottom + (1 - k_bottom) * f)
             touched |= set(v.link_faces)
+    reuv(uv, touched)                                  # tekstura zostaje na miejscu - kawalek jest wyrwany
     triangulate_ngons(bm, touched)
 
 
@@ -118,6 +155,7 @@ def crack_board(bm, L, W, T, rng, p):
     Zwraca funkcje przeksztalcajaca punkty (dla gwozdzi) albo None."""
     x0 = rng.uniform(-0.2, 0.2) * L
     amp = min(p.crack_jag, 0.15 * L)
+    uv = top_uv(bm, L, p)                              # UV wierzchu sprzed pekniecia
     r = bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
                                plane_co=Vector((x0, 0, 0)), plane_no=Vector((1, 0, 0)))
     on = lambda v: abs(v.co.x - x0) < 1e-6
@@ -138,6 +176,12 @@ def crack_board(bm, L, W, T, rng, p):
     bmesh.ops.split_edges(bm, edges=ring)
     bnd = [e for e in bm.edges if e.is_boundary]
     res = bmesh.ops.holes_fill(bm, edges=bnd, sides=0)
+    # UV: sciany pekniecia i sciany przy poszarpanej linii - z wierzchu deski (bez sciagniecia)
+    touched = set(res["faces"])
+    for e in bm.edges:
+        if e.is_valid and abs(e.verts[0].co.x - x0) <= 1.3 * amp and abs(e.verts[1].co.x - x0) <= 1.3 * amp:
+            touched |= set(e.link_faces)
+    reuv(uv, touched)
     triangulate_ngons(bm, res["faces"])
     # kawalek po stronie +x (spojna czesc zawierajaca najdalszy wierzcholek)
     start = max(bm.verts, key=lambda v: v.co.x)

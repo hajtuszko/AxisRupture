@@ -187,6 +187,93 @@ def point_in_poly(pt, poly):
     return inside
 
 
+# ---------------------------------------------------------------- UV bokow i czol deski
+def fit_top_uv(samples):
+    """UV wierzchu deski jako funkcja liniowa polozenia na wierzchu: uv = c + A*(x, y).
+    samples = [((x, y), (u, v))] w ukladzie, w ktorym wierzch lezy w plaszczyznie xy."""
+    import numpy as np
+    if len(samples) < 3:
+        return None
+    X = np.array([[x, y, 1.0] for (x, y), _ in samples])
+    U = np.array([uv for _, uv in samples])
+    coef, *_ = np.linalg.lstsq(X, U, rcond=None)
+    return lambda x, y: (coef[0][0] * x + coef[1][0] * y + coef[2][0], coef[0][1] * x + coef[1][1] * y + coef[2][1])
+
+
+def top_outline(top_faces, to_frame):
+    """krawedzie obrysu wierzchu deski (w ukladzie wierzchu, 2D)"""
+    tops = set(top_faces)
+    segs = []
+    for f in top_faces:
+        for e in f.edges:
+            if sum(1 for g in e.link_faces if g in tops) == 1:
+                a, b = to_frame(e.verts[0].co, False), to_frame(e.verts[1].co, False)
+                segs.append((Vector((a.x, a.y)), Vector((b.x, b.y))))
+    return segs
+
+
+def _nearest_on(segs, q):
+    best, bd = None, 1e18
+    for a, b in segs:
+        ab = b - a
+        t = 0.0 if ab.length_squared < 1e-18 else max(0.0, min(1.0, (q - a).dot(ab) / ab.length_squared))
+        c = a + ab * t
+        d = (q - c).length_squared
+        if d < bd:
+            best, bd = c, d
+    return best
+
+
+def unfold_uv(faces, uvl, to_frame, uvf, z_top, segs=None):
+    """Rozklada UV scian bocznych (boki, czola, fazy, pekniecia) i spodu przez 'zagiecie' wierzchu:
+    punkt dostaje UV punktu wierzchu lezacego w glab deski od najblizszej krawedzi obrysu, w odleglosci
+    rownej drodze po powierzchni (odsuniecie w poziomie + glebokosc). Tekstura przechodzi przez krawedz
+    bez szwu, z ta sama gestoscia co na wierzchu i bez ciemnej szczeliny sasiedniej deski. Spod - rzut."""
+    for f in faces:
+        n = to_frame(f.normal, True)
+        h = Vector((n.x, n.y)); hl = h.length
+        for lp in f.loops:
+            q = to_frame(lp.vert.co, False)
+            q2 = Vector((q.x, q.y))
+            d = max(0.0, z_top - q.z)
+            if hl > 0.2 and n.z < 0.9:
+                hn = h / hl
+                edge = _nearest_on(segs, q2) if segs else None
+                if edge is not None:
+                    off = max(0.0, (q2 - edge).dot(hn))            # jak daleko na zewnatrz obrysu
+                    p = edge - hn * (off + d)
+                else:
+                    p = q2 - hn * d
+                x, y = p.x, p.y
+            else:
+                x, y = q.x, q.y
+            lp[uvl].uv = uvf(x, y)
+
+
+def board_uv_frame(nrm, origin):
+    """uklad z wierzchem deski w plaszczyznie xy (z = normalna wierzchu)"""
+    e3 = nrm.normalized(); e1 = e3.orthogonal().normalized(); e2 = e3.cross(e1)
+    M = Matrix((e1, e2, e3))
+
+    def to_frame(v, is_dir):
+        return M @ v if is_dir else M @ (v - origin)
+    return to_frame
+
+
+def fix_side_uvs(bm, uvl, to_frame, top_faces, other_faces):
+    """dopasuj UV wierzchu i rozloz wg niego pozostale sciany"""
+    z_top = max(to_frame(v.co, False).z for f in top_faces for v in f.verts)
+    samples = []
+    for f in top_faces:
+        for lp in f.loops:
+            q = to_frame(lp.vert.co, False)
+            samples.append(((q.x, q.y), tuple(lp[uvl].uv)))
+    uvf = fit_top_uv(samples)
+    if uvf:
+        unfold_uv(other_faces, uvl, to_frame, uvf, z_top, top_outline(top_faces, to_frame))
+    return uvf
+
+
 # ---------------------------------------------------------------- geometria
 def clip_rect(poly, u0, u1, v0, v1):
     """Sutherland-Hodgman: wielokat (lista (u,v)) przyciety do prostokata"""
@@ -424,6 +511,12 @@ class DESKI_OT_split(bpy.types.Operator):
                     if top_edges:
                         bmesh.ops.bevel(bm, geom=top_edges, offset=min(p.chamfer, p.thickness * 0.45),
                                         offset_type='OFFSET', segments=1, affect='EDGES', clamp_overlap=True)
+                # UV bokow, czol, fazy i spodu - rozlozone z wierzchu (inaczej sa sciagniete w linie)
+                to_frame = board_uv_frame(nrm, next(iter(bm.verts)).co.copy())
+                z_max = max(to_frame(v.co, False).z for v in bm.verts)
+                tops = [f for f in bm.faces if to_frame(f.normal, True).z > 0.999
+                        and all(to_frame(v.co, False).z > z_max - 1e-6 for v in f.verts)]
+                fix_side_uvs(bm, uvl, to_frame, tops, [f for f in bm.faces if f not in set(tops)])
             bm.faces.ensure_lookup_table()
             dm = bpy.data.meshes.new(f"{src.name}_Deska")
             bm.to_mesh(dm); bm.free()
