@@ -106,6 +106,23 @@ class Board:
         self.sk = [-self.L / 2 + k * self.ds for k in range(self.N + 1)]
         self.kA = max(1, int(round(nail_frac * self.N)))
         self.kB = self.N - self.kA
+        # gwozdzie wykryte na teksturze (Przygotowanie desek): (wezel k, polozenie w poprzek w)
+        self.tex_nails = []
+        d = self.o.get("deski_gwozdzie_tex")
+        if d:
+            mw = self.o.matrix_world
+            for i in range(0, len(d), 3):
+                q = self.Finv @ (mw @ Vector(d[i:i + 3]))
+                k = min(self.N - 1, max(1, int(round((q.x + self.L / 2) / self.ds))))
+                self.tex_nails.append((k, max(-self.W / 2, min(self.W / 2, q.y))))
+            ks = sorted(k for k, w in self.tex_nails)
+            # deska trzyma sie na skrajnych gwozdziach (najblizej koncow)
+            if ks and ks[0] < self.N / 2:
+                self.kA = ks[0]
+            if ks and ks[-1] > self.N / 2:
+                self.kB = ks[-1]
+            if self.kB - self.kA < 2:
+                self.kA = max(1, int(round(nail_frac * self.N))); self.kB = self.N - self.kA
         ns = max(21, int(math.ceil(self.L / 0.02)) + 1)
         self.sg = [-self.L / 2 + self.L * j / (ns - 1) for j in range(ns)]
         self.wg = [-self.W / 2, -self.W / 4, 0.0, self.W / 4, self.W / 2]
@@ -617,8 +634,19 @@ class DESKI_OT_deform(bpy.types.Operator):
         stats = {"prosta": 0, "wygieta": 0}
         for b in moved:
             # gwozdzie (dla modulu Detale): gora i spod deski w miejscu gwozdzia + czy puscil
-            released = {1: set(), 2: {b.kB if b.side == 1 else b.kA}, 3: {b.kA, b.kB}}[b.phase]
-            nails = [(b.node_point(k, 0.0, b.T), b.node_point(k, 0.0, 0.0), k in released) for k in (b.kA, b.kB)]
+            if b.tex_nails:
+                # prawdziwe gwozdzie z tekstury; puszczaja wszystkie poza trzymajacym koncem
+                def rel(k):
+                    if b.phase == 3:
+                        return True
+                    if b.phase == 2:
+                        return k > b.kA if b.side == 1 else k < b.kB
+                    return False
+                src = [(k, w, rel(k)) for k, w in b.tex_nails]
+            else:
+                released = {1: set(), 2: {b.kB if b.side == 1 else b.kA}, 3: {b.kA, b.kB}}[b.phase]
+                src = [(k, 0.0, k in released) for k in (b.kA, b.kB)]
+            nails = [(b.node_point(k, w, b.T), b.node_point(k, w, 0.0), r) for k, w, r in src]
             stats[self.apply(b, p.smooth_shading, p.bevel_segments)] += 1
             inv = b.o.matrix_world.inverted()
             data = []

@@ -75,26 +75,124 @@ def splinter_end(bm, sgn, L, W, T, rng, p):
     triangulate_ngons(bm, touched)
 
 
-# ---------------------------------------------------------------- odksztalcenie wyrwanej deski
-def warp_board(bm, L, W, T, rng, p, margin):
-    """trwale odksztalcenie: lekki luk wzdluz deski + skret; kilka petli, flat shading jak oryginal"""
-    n = p.warp_loops
+# ---------------------------------------------------------------- zwichrowanie / odksztalcenie
+class Warp:
+    """trwale odksztalcenie deski: luk wzdluz (strzalka sag) + skret (kat tw na koncach).
+    Ta sama funkcja przesuwa wierzcholki i punkty gwozdzi."""
+    def __init__(self, L, sag, tw):
+        self.L, self.sag, self.tw = L, sag, tw
+
+    def __call__(self, co):
+        x, y, z = co
+        t = max(-1.0, min(1.0, 2 * x / self.L))
+        a = self.tw * t                                # skret narasta od srodka ku koncom
+        return Vector((x, y * math.cos(a) - z * math.sin(a),
+                       y * math.sin(a) + z * math.cos(a) + self.sag * (1 - t * t)))
+
+
+def add_loops(bm, L, n, margin, avoid=()):
+    """n petli w poprzek deski, rowno rozlozonych, z dala od koncow i od stref 'avoid' (x0, promien)"""
     lo, hi = -L / 2 + margin, L / 2 - margin
-    if n > 0 and hi > lo:
-        for i in range(n):
-            x = lo + (hi - lo) * (i + 1) / (n + 1)
+    if n <= 0 or hi <= lo:
+        return
+    for i in range(n):
+        x = lo + (hi - lo) * (i + 1) / (n + 1)
+        for x0, r in avoid:
+            if abs(x - x0) < r:
+                x = x0 + math.copysign(r, x - x0 if x != x0 else 1.0)
+        if lo < x < hi:
             bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
                                    plane_co=Vector((x, 0, 0)), plane_no=Vector((1, 0, 0)))
-    sag = rng.uniform(0.3, 1.0) * p.warp_bow * L * rng.choice((-1, 1))
-    tw = math.radians(p.warp_twist) * rng.uniform(-1, 1)
+
+
+def warp_board(bm, warp):
     for v in bm.verts:
-        x, y, z = v.co
-        t = max(-1.0, min(1.0, 2 * x / L))
-        a = tw * t                                     # skret narasta od srodka ku koncom
-        y2 = y * math.cos(a) - z * math.sin(a)
-        z2 = y * math.sin(a) + z * math.cos(a)
-        v.co = Vector((x, y2, z2 + sag * (1 - t * t)))
+        v.co = warp(v.co)
     triangulate_ngons(bm, bm.faces[:])
+
+
+# ---------------------------------------------------------------- pekniecie deski
+def crack_board(bm, L, W, T, rng, p):
+    """pekniecie w poprzek po poszarpanej linii: deska dzieli sie na dwa zamkniete kawalki,
+    kawalek od strony +x odgina sie na zawiasie przy gornej krawedzi (szpara otwiera sie od spodu).
+    Zwraca funkcje przeksztalcajaca punkty (dla gwozdzi) albo None."""
+    x0 = rng.uniform(-0.2, 0.2) * L
+    amp = min(p.crack_jag, 0.15 * L)
+    r = bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+                               plane_co=Vector((x0, 0, 0)), plane_no=Vector((1, 0, 0)))
+    on = lambda v: abs(v.co.x - x0) < 1e-6
+    rows = [e for e in r["geom_cut"] if isinstance(e, bmesh.types.BMEdge)
+            and abs(e.verts[0].co.y - e.verts[1].co.y) > 0.5 * W]
+    n = rng.randint(3, 6)
+    if rows:
+        bmesh.ops.subdivide_edges(bm, edges=rows, cuts=n - 1, use_grid_fill=False)
+    ring = [e for e in bm.edges if on(e.verts[0]) and on(e.verts[1])]
+    ring_v = {v for e in ring for v in e.verts}
+    if len(ring) < 4:
+        return None
+    # poszarpana linia: przesuniecie wzdluz deski zalezne od polozenia w poprzek
+    ys = sorted({round(v.co.y, 5) for v in ring_v})
+    off = {y: rng.uniform(-1, 1) * amp for y in ys}
+    for v in ring_v:
+        v.co.x += off[round(v.co.y, 5)] + rng.uniform(-0.1, 0.1) * amp
+    bmesh.ops.split_edges(bm, edges=ring)
+    bnd = [e for e in bm.edges if e.is_boundary]
+    res = bmesh.ops.holes_fill(bm, edges=bnd, sides=0)
+    triangulate_ngons(bm, res["faces"])
+    # kawalek po stronie +x (spojna czesc zawierajaca najdalszy wierzcholek)
+    start = max(bm.verts, key=lambda v: v.co.x)
+    part, stack = set(), [start]
+    while stack:
+        v = stack.pop()
+        if v in part:
+            continue
+        part.add(v); stack.extend(e.other_vert(v) for e in v.link_edges)
+    if len(part) == len(bm.verts):
+        return None
+    zp = max(v.co.z for v in part)
+    gap = rng.uniform(0.002, 0.006)
+    ang = -math.radians(p.crack_angle) * rng.uniform(0.3, 1.0)       # odgiecie w gore
+    piv = Vector((x0 - amp, 0, zp))
+    R = Matrix.Translation(piv + Vector((gap, 0, 0))) @ Matrix.Rotation(ang, 4, 'Y') @ Matrix.Translation(-piv)
+    for v in part:
+        v.co = R @ v.co
+    # zeby poszarpanej linii nie moga na siebie nachodzic - odsuwaj kawalek, az sie rozdziela
+    pf = [f for f in bm.faces if f.verts[0] in part]
+    of = [f for f in bm.faces if f.verts[0] not in part]
+
+    def tree(fs):
+        vs, idx, polys = [], {}, []
+        for f in fs:
+            for v in f.verts:
+                if v not in idx:
+                    idx[v] = len(vs); vs.append(v.co.copy())
+            polys.append([idx[v] for v in f.verts])
+        return BVHTree.FromPolygons(vs, polys)
+    t_other = tree(of)
+    shift = 0.0
+    while tree(pf).overlap(t_other):
+        if shift > 2 * amp + 0.02:
+            return None                                # nie da sie rozdzielic - bez pekniecia
+        for v in part:
+            v.co.x += 0.003
+        shift += 0.003
+    if any(not e.is_manifold for e in bm.edges):
+        return None
+    R = Matrix.Translation((shift, 0, 0)) @ R
+    split_x = x0
+    return (lambda co: (R @ co) if co.x > split_x else co), (x0, amp + gap + shift + 0.02)
+
+
+def mesh_ok(me):
+    """zamknieta bryla (kazda krawedz miedzy 2 scianami) i bez przeciec siatki samej ze soba"""
+    bm = bmesh.new(); bm.from_mesh(me)
+    ok = all(e.is_manifold for e in bm.edges)
+    if ok:
+        bmesh.ops.triangulate(bm, faces=bm.faces[:]); bm.faces.ensure_lookup_table()
+        t = BVHTree.FromBMesh(bm)
+        ok = not any(i < j and not (set(bm.faces[i].verts) & set(bm.faces[j].verts)) for i, j in t.overlap(t))
+    bm.free()
+    return ok
 
 
 # ---------------------------------------------------------------- gwozdz (wspolna siatka)
@@ -162,7 +260,7 @@ class DESKI_OT_details(bpy.types.Operator):
             te.to_mesh_clear()
         boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices
                   and not o.name.startswith(NAIL_MESH) and o.dimensions.z > 1e-4]
-        st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "gwozdzie": 0, "pominiete": 0}
+        st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "pekniete": 0, "gwozdzie": 0, "pominiete": 0}
         backup = {}                                    # deska -> (siatka, macierz) sprzed detali
         for o in boards:
             if o.get("deski_detale"):
@@ -170,13 +268,21 @@ class DESKI_OT_details(bpy.types.Operator):
                 continue
             rng = random.Random(p.seed * 7919 + zlib.crc32(o.name.encode()))
             faza = o.get("deski_faza")
-            if faza is None and p.use_jitter:
-                backup[o] = (o.data, o.matrix_world.copy())
-                self.jitter(o, rng, p); st["nierownosci"] += 1
-            elif faza == "wyrwana" and (p.use_splinters or p.use_warp):
+            if faza is None and (p.use_jitter or p.use_twist_nailed):
                 backup[o] = (o.data.copy(), o.matrix_world.copy())
-                s, w = self.damage(o, rng, p)
-                st["drzazgi"] += s; st["odksztalcone"] += w
+                self.jitter(o, rng, p); st["nierownosci"] += 1
+            elif faza == "wyrwana" and (p.use_splinters or p.use_warp or p.use_crack):
+                backup[o] = (o.data.copy(), o.matrix_world.copy())
+                s, w, c = self.damage(o, rng, p)
+                if c and not mesh_ok(o.data):
+                    # pekniecie zepsulo siatke - powtorz bez pekniecia (z kopii sprzed detali)
+                    bad = o.data
+                    o.data = backup[o][0].copy(); o.matrix_world = backup[o][1]
+                    if bad.users == 0:
+                        bpy.data.meshes.remove(bad)
+                    rng = random.Random(p.seed * 7919 + zlib.crc32(o.name.encode()))
+                    s, w, c = self.damage(o, rng, p, allow_crack=False)
+                st["drzazgi"] += s; st["odksztalcone"] += w; st["pekniete"] += c
             o["deski_detale"] = 1
         # detale nie moga wcisnac deski w sasiednia - takie zmiany sa cofane
         context.view_layer.update()
@@ -203,7 +309,7 @@ class DESKI_OT_details(bpy.types.Operator):
                     st["gwozdzie"] += self.nails(o, rng, p, nails_coll)
                     o["deski_gwozdzie_dodane"] = 1
         msg = (f"Detale: nierownosci {st['nierownosci']}, drzazgi (konce) {st['drzazgi']}, "
-               f"odksztalcone {st['odksztalcone']}, gwozdzie {st['gwozdzie']}")
+               f"odksztalcone {st['odksztalcone']}, pekniete {st['pekniete']}, gwozdzie {st['gwozdzie']}")
         if reverted:
             msg += f", cofniete (kolizja z sasiednia deska) {reverted}"
         if st["pominiete"]:
@@ -280,38 +386,72 @@ class DESKI_OT_details(bpy.types.Operator):
         z_min = min(v.z for v in vs)
         Bw = mw @ B.inverted()                         # uklad deski -> swiat
         pivot = Bw @ Vector((0, 0, -T / 2))
-        yaw = rng.uniform(-1, 1) * p.jitter_shift / max(L / 2, 1e-6)   # koniec przesuwa sie max o jitter_shift
-        roll = math.radians(p.jitter_tilt) * rng.uniform(-1, 1)
-        pitch = math.radians(p.jitter_tilt) * rng.uniform(-1, 1) * min(1.0, W / L)
+        on = 1.0 if p.use_jitter else 0.0
+        yaw = on * rng.uniform(-1, 1) * p.jitter_shift / max(L / 2, 1e-6)   # koniec przesuwa sie max o jitter_shift
+        roll = on * math.radians(p.jitter_tilt) * rng.uniform(-1, 1)
+        pitch = on * math.radians(p.jitter_tilt) * rng.uniform(-1, 1) * min(1.0, W / L)
         Rb = Bw.to_3x3().normalized()
         R = (Rb @ Matrix.Rotation(yaw, 3, 'Z') @ Matrix.Rotation(roll, 3, 'X') @ Matrix.Rotation(pitch, 3, 'Y')
              @ Rb.inverted()).to_4x4()
         M = Matrix.Translation(pivot) @ R @ Matrix.Translation(-pivot)
+        if p.use_twist_nailed and p.twist_nailed > 0:
+            # lekkie zwichrowanie przybitej deski (unosza sie narozniki) - 2 petle
+            if o.data.users > 1:
+                o.data = o.data.copy()
+            bm = bmesh.new(); bm.from_mesh(o.data); bm.transform(B)
+            add_loops(bm, L, 2, 0.05 * L)
+            warp_board(bm, Warp(L, 0.0, math.radians(p.twist_nailed) * rng.uniform(-1, 1)))
+            bm.transform(B.inverted())
+            bm.to_mesh(o.data); bm.free(); o.data.update()
         new = M @ mw
         z2 = min((new @ v.co).z for v in o.data.vertices)
-        o.matrix_world = Matrix.Translation((0, 0, z_min - z2 + rng.uniform(0, p.jitter_lift))) @ new
+        o.matrix_world = Matrix.Translation((0, 0, z_min - z2 + on * rng.uniform(0, p.jitter_lift))) @ new
 
-    # --- 6 + odksztalcenie: wyrwane deski
-    def damage(self, o, rng, p):
+    # --- 6 + odksztalcenie + pekniecie: wyrwane deski
+    def damage(self, o, rng, p, allow_crack=True):
         B, L, W, T = board_frame(o)
         if o.data.users > 1:
             o.data = o.data.copy()
         bm = bmesh.new(); bm.from_mesh(o.data)
         bm.transform(B)
-        n_spl = 0
+        # gwozdzie przesuwaja sie razem z deska (te same przeksztalcenia co wierzcholki)
+        nd = list(o.get("deski_gwozdzie", []))
+        npts = [B @ Vector(nd[i:i + 3]) for i in range(0, len(nd), 7)] + \
+               [B @ Vector(nd[i + 3:i + 6]) for i in range(0, len(nd), 7)]
+        n_spl = cracked = warped = 0
         if p.use_splinters:
             for sgn in (-1, 1):
                 if rng.random() < p.splinter_chance:
                     splinter_end(bm, sgn, L, W, T, rng, p); n_spl += 1
-        warped = 0
+        end_margin = (min(p.splinter_depth, 0.25 * L) + 0.01) if n_spl else 0.02
+        avoid = []
+        if allow_crack and p.use_crack and L > p.crack_min_length and rng.random() < p.crack_chance:
+            trial = bm.copy()                          # pekniecie na kopii - gdy sie nie uda, deska zostaje cala
+            res = crack_board(trial, L, W, T, rng, p)
+            if res:
+                bm.free(); bm = trial
+            else:
+                trial.free()
+            if res:
+                f, zone = res
+                npts = [f(q) for q in npts]; cracked = 1
+                avoid = [zone]                          # petle odksztalcenia omijaja linie pekniecia
         if p.use_warp:
-            margin = min(p.splinter_depth, 0.25 * L) + 0.01 if n_spl else 0.01
-            warp_board(bm, L, W, T, rng, p, margin); warped = 1
+            add_loops(bm, L, p.warp_loops, end_margin, avoid=avoid)
+            warp = Warp(L, rng.uniform(0.3, 1.0) * p.warp_bow * L * rng.choice((-1, 1)),
+                        math.radians(p.warp_twist) * rng.uniform(-1, 1))
+            warp_board(bm, warp)
+            npts = [warp(q) for q in npts]; warped = 1
         bm.transform(B.inverted())
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.to_mesh(o.data); bm.free(); o.data.update()
+        if nd:
+            Bi = B.inverted(); k = len(npts) // 2
+            for j, i in enumerate(range(0, len(nd), 7)):
+                nd[i:i + 3] = list(Bi @ npts[j]); nd[i + 3:i + 6] = list(Bi @ npts[k + j])
+            o["deski_gwozdzie"] = nd
         self.lift_clear(o, o.get("deski_podloga"))
-        return n_spl, warped
+        return n_spl, warped, cracked
 
     # --- 7: gwozdzie wyrwane razem z deska (wystaja spod deski)
     def nails(self, o, rng, p, coll):
@@ -353,6 +493,9 @@ class DeskiDetailSettings(bpy.types.PropertyGroup):
     jitter_shift: bpy.props.FloatProperty(name="Maks. przesuniecie konca", default=0.0004, min=0.0, unit='LENGTH',
                                           description="Obrot w poziomie: o tyle przesuwa sie koniec deski. "
                                                       "Trzymaj ponizej polowy szczeliny miedzy deskami")
+    use_twist_nailed: bpy.props.BoolProperty(name="Zwichrowanie nietknietych desek", default=True)
+    twist_nailed: bpy.props.FloatProperty(name="Maks. skret (st.)", default=1.5, min=0.0, max=10.0,
+                                          description="Skret przybitej deski (unosza sie narozniki), 2 petle")
     use_splinters: bpy.props.BoolProperty(name="Drzazgi na koncach wyrwanych desek", default=True)
     splinter_chance: bpy.props.FloatProperty(name="Szansa na koniec", default=0.6, min=0.0, max=1.0, subtype='FACTOR')
     splinter_depth: bpy.props.FloatProperty(name="Glebokosc", default=0.05, min=0.005, unit='LENGTH')
@@ -361,11 +504,17 @@ class DeskiDetailSettings(bpy.types.PropertyGroup):
     splinter_out: bpy.props.FloatProperty(name="Szansa na wystajaca drzazge", default=0.35, min=0.0, max=1.0,
                                           subtype='FACTOR')
     use_warp: bpy.props.BoolProperty(name="Odksztalcenie wyrwanych desek", default=True)
-    warp_bow: bpy.props.FloatProperty(name="Wygiecie (dlugosci)", default=0.008, min=0.0, max=0.1, subtype='FACTOR',
+    warp_bow: bpy.props.FloatProperty(name="Wygiecie (dlugosci)", default=0.02, min=0.0, max=0.1, subtype='FACTOR',
                                       description="Strzalka luku jako ulamek dlugosci deski")
-    warp_twist: bpy.props.FloatProperty(name="Skret (st.)", default=3.0, min=0.0, max=30.0)
-    warp_loops: bpy.props.IntProperty(name="Petle", default=3, min=0, max=12,
+    warp_twist: bpy.props.FloatProperty(name="Skret (st.)", default=8.0, min=0.0, max=30.0)
+    warp_loops: bpy.props.IntProperty(name="Petle", default=4, min=0, max=12,
                                       description="Ile petli wzdluz deski na odksztalcenie (malo = mniej poligonow)")
+    use_crack: bpy.props.BoolProperty(name="Pekniecia wyrwanych desek", default=True)
+    crack_chance: bpy.props.FloatProperty(name="Szansa", default=0.35, min=0.0, max=1.0, subtype='FACTOR')
+    crack_min_length: bpy.props.FloatProperty(name="Min. dlugosc deski", default=0.8, min=0.0, unit='LENGTH')
+    crack_angle: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=12.0, min=0.0, max=60.0)
+    crack_jag: bpy.props.FloatProperty(name="Poszarpanie", default=0.04, min=0.0, unit='LENGTH',
+                                       description="Jak daleko wzdluz deski biegnie poszarpana linia pekniecia")
     use_nails: bpy.props.BoolProperty(name="Gwozdzie wyrwane z deskami", default=True)
     nail_chance: bpy.props.FloatProperty(name="Szansa", default=0.8, min=0.0, max=1.0, subtype='FACTOR')
     nail_length: bpy.props.FloatProperty(name="Dlugosc", default=0.05, min=0.01, unit='LENGTH')
@@ -389,7 +538,9 @@ class DESKI_PT_details(bpy.types.Panel):
         for flag, props in (("use_jitter", ("jitter_lift", "jitter_tilt", "jitter_shift")),
                             ("use_splinters", ("splinter_chance", "splinter_depth", "splinter_teeth_min",
                                                "splinter_teeth_max", "splinter_out")),
+                            ("use_twist_nailed", ("twist_nailed",)),
                             ("use_warp", ("warp_bow", "warp_twist", "warp_loops")),
+                            ("use_crack", ("crack_chance", "crack_min_length", "crack_angle", "crack_jag")),
                             ("use_nails", ("nail_chance", "nail_length", "nail_diameter", "nail_head", "nail_tilt"))):
             box = col.box(); box.prop(p, flag)
             sub = box.column(); sub.enabled = getattr(p, flag)

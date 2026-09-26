@@ -116,20 +116,75 @@ def detect_planks(lum, sens=4.0, min_width=0.015, min_length=0.05, cover=0.6, co
     return axis, seams, bands
 
 
-def find_texture(obj, override=None):
-    """obraz do analizy: wskazany recznie, albo z materialu - najlepiej AO / Cavity, potem Base Color"""
-    if override:
-        return override
+def _box(a, rad):
+    """srednia w oknie (2*rad+1)^2, cyklicznie (tekstura sie powtarza)"""
+    import numpy as np
+    k = 2 * rad + 1
+    c = np.cumsum(np.cumsum(np.pad(a, ((rad + 1, rad), (rad + 1, rad)), mode='wrap'), 0), 1)
+    return (c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]) / (k * k)
+
+
+def detect_nail_dots(img, cool_thr=-0.06, dark_thr=0.08):
+    """lebki gwozdzi na teksturze koloru: male, ciemne, chlodne (szaroniebieskie) punkty na brazowym drewnie.
+    Zwraca liste (u, v) w 0..1."""
+    import numpy as np
+    w, h = img.size
+    px = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(h, w, 4)
+    r, g, b = px[..., 0], px[..., 1], px[..., 2]
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    cool = b - r                                       # drewno ujemne, stal blisko zera
+    dark = _box(lum, 6) - lum                          # ciemniejszy od otoczenia
+    score = cool + dark
+    m = score.copy()
+    for dy in range(-3, 4):                            # lokalne maksimum w oknie 7x7
+        for dx in range(-3, 4):
+            if dx or dy:
+                m = np.maximum(m, np.roll(np.roll(score, dy, 0), dx, 1))
+    pts = np.argwhere((score == m) & (cool > cool_thr) & (dark > dark_thr))
+    return [((x + 0.5) / w, (y + 0.5) / h) for y, x in pts]
+
+
+def _images(obj):
     imgs = []
     for slot in obj.material_slots:
         m = slot.material
         if m and m.node_tree:
             imgs += [n.image for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image]
-    for key in ("_ao", "ambient", "occlusion", "cavity", "basecolor", "base_color", "albedo", "diffuse", "color"):
+    return imgs
+
+
+def _pick(imgs, keys):
+    for key in keys:
         for im in imgs:
             if key in (im.name + im.filepath).lower().replace(" ", ""):
                 return im
-    return imgs[0] if imgs else None
+    return None
+
+
+def find_texture(obj, override=None):
+    """obraz do szczelin: wskazany recznie, albo z materialu - najlepiej AO / Cavity, potem Base Color"""
+    if override:
+        return override
+    imgs = _images(obj)
+    return _pick(imgs, ("_ao", "ambient", "occlusion", "cavity", "basecolor", "base_color", "albedo",
+                        "diffuse", "color")) or (imgs[0] if imgs else None)
+
+
+def find_color_texture(obj, override=None):
+    """obraz do gwozdzi: kolor (lebki gwozdzi odrozniaja sie kolorem od drewna)"""
+    if override:
+        return override
+    return _pick(_images(obj), ("basecolor", "base_color", "albedo", "diffuse", "color"))
+
+
+def point_in_poly(pt, poly):
+    x, y = pt; inside = False
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            inside = not inside
+    return inside
 
 
 # ---------------------------------------------------------------- geometria
@@ -216,9 +271,18 @@ class DESKI_OT_split(bpy.types.Operator):
             axis, seams, bands = cache[img.name]
             if len(seams) < 2:
                 msgs.append(f"{src.name}: nie wykryto szczelin na {img.name}"); continue
-            n = self.split_object(context, src, out, axis, bands, p)
+            dots, cimg = [], None
+            if p.detect_nails:
+                cimg = find_color_texture(src, p.nail_texture)
+                if cimg is not None and cimg.size[0] > 0:
+                    if ("n", cimg.name) not in cache:
+                        cache[("n", cimg.name)] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
+                    dots = cache[("n", cimg.name)]
+            n, nn = self.split_object(context, src, out, axis, bands, p, dots)
             total += n
-            msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})")
+            msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
+                        + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
+                           (", gwozdzie: brak tekstury koloru" if p.detect_nails else "")))
             if p.hide_source:
                 src.hide_set(True); src.hide_render = True
         for m in msgs:
@@ -226,10 +290,12 @@ class DESKI_OT_split(bpy.types.Operator):
         self.report({'INFO'} if total else {'WARNING'}, f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs))
         return {'FINISHED'} if total else {'CANCELLED'}
 
-    def split_object(self, context, src, out, axis, bands, p):
+    def split_object(self, context, src, out, axis, bands, p, dots=()):
         me = src.data
         uv = me.uv_layers.active.data
         pieces = {}                                    # klucz deski -> lista wielokatow [(P3d, uv)]
+        rects = {}                                     # klucz deski -> (A, B w poprzek, c0, c1 wzdluz) w UV
+        faces_uv = {}                                  # klucz deski -> [(wielokat UV, mapowanie UV->3D)]
         # granice desek wzdluz pasa - liczone raz dla calego obiektu (deska przez kilka scian = jedna deska)
         all_alg = [l.uv[1] if axis == 'V' else l.uv[0] for l in uv]
         glo, ghi = min(all_alg) - 1, max(all_alg) + 1
@@ -312,7 +378,10 @@ class DESKI_OT_split(bpy.types.Operator):
                         # klucz: pas + odcinek (bez numeru kafla wzdluz - te same deski w roznych scianach)
                         key = (t, bi, round(c0, 6))
                         pieces.setdefault(key, []).append(pts)
+                        rects[key] = (A, Bb, c0, c1)
+                        faces_uv.setdefault(key, []).append((cl, f3))
         count = 0
+        n_nails = 0
         mw = src.matrix_world
         for key, polys in sorted(pieces.items()):
             bm = bmesh.new()
@@ -370,7 +439,43 @@ class DESKI_OT_split(bpy.types.Operator):
             ob = bpy.data.objects.new(f"{src.name}_Deska_{count:03d}", dm)
             ob.matrix_world = mw @ Matrix.Translation(c)
             out.objects.link(ob)
-        return count
+            if dots:
+                loc = self.board_nails(key, rects[key], faces_uv[key], dots, axis, m_per_uv, alo, ahi)
+                if loc:
+                    ob["deski_gwozdzie_tex"] = [x for q in loc for x in (q - c)]   # lokalnie, na wierzchu deski
+                    n_nails += len(loc)
+        return count, n_nails
+
+    @staticmethod
+    def board_nails(key, rect, fpolys, dots, axis, m_per_uv, alo, ahi):
+        """gwozdzie z tekstury na tej desce: blisko bocznych krawedzi (narozniki) i parami w poprzek"""
+        A, Bb, c0, c1 = rect
+        lo, hi = max(c0, alo), min(c1, ahi)
+        cand = []
+        for du, dv in dots:
+            ac0, al0 = (du, dv) if axis == 'V' else (dv, du)
+            for i in range(math.floor(A) - 1, math.ceil(Bb) + 1):
+                acr = ac0 + i
+                if not (A < acr < Bb):
+                    continue
+                f = (acr - A) / (Bb - A)               # polozenie w poprzek deski (0..1)
+                if not (0.04 < f < 0.42 or 0.58 < f < 0.96):
+                    continue
+                for j in range(math.floor(lo) - 1, math.ceil(hi) + 1):
+                    alg = al0 + j
+                    if lo < alg < hi:
+                        cand.append((acr, alg, f < 0.5))
+        pair_tol = 0.06 / max(m_per_uv, 1e-9)          # para gwozdzi: do 6 cm roznicy wzdluz deski
+        out = []
+        for acr, alg, left in cand:
+            if not any(l2 != left and abs(a2 - alg) < pair_tol for _, a2, l2 in cand):
+                continue                               # samotna kropka (plama, sek) - nie gwozdz
+            u, v = (acr, alg) if axis == 'V' else (alg, acr)
+            for cl, f3 in fpolys:
+                if point_in_poly((u, v), cl):
+                    out.append(f3(u, v))
+                    break
+        return out
 
 
 # ---------------------------------------------------------------- ustawienia + panel
@@ -404,6 +509,13 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     min_piece: bpy.props.FloatProperty(name="Min. kawalek", default=0.02, min=0.0, unit='LENGTH',
                                        description="Pomijaj drzazgi wezsze niz tyle (przy brzegach plaszczyzny)")
     hide_source: bpy.props.BoolProperty(name="Ukryj plaszczyzne zrodlowa", default=True)
+    detect_nails: bpy.props.BoolProperty(name="Wykrywaj gwozdzie", default=True,
+                                         description="Lebki gwozdzi z tekstury koloru (ciemne, chlodne punkty parami przy "
+                                                     "krawedziach deski) - uzywane przy wyrywaniu i w detalach")
+    nail_texture: bpy.props.PointerProperty(name="Tekstura gwozdzi (opcj.)", type=bpy.types.Image,
+                                            description="Puste = Base Color z materialu")
+    nail_dark: bpy.props.FloatProperty(name="Gwozdzie: kontrast", default=0.08, min=0.01, max=0.5,
+                                       description="O ile lebek musi byc ciemniejszy od drewna obok. Mniej = wiecej gwozdzi")
 
 
 class DESKI_PT_prep(bpy.types.Panel):
@@ -421,6 +533,9 @@ class DESKI_PT_prep(bpy.types.Panel):
         box = col.box(); box.label(text="Wykrywanie szczelin")
         box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
         box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
+        box = col.box(); box.prop(p, "detect_nails")
+        sub = box.column(); sub.enabled = p.detect_nails
+        sub.prop(p, "nail_texture"); sub.prop(p, "nail_dark")
         box = col.box(); box.label(text="Deski")
         box.prop(p, "max_length"); box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
         col.prop(p, "hide_source")
