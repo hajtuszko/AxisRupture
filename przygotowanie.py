@@ -1,6 +1,7 @@
 # Etap 2: przygotowanie desek - podzial plaszczyzny podlogi na osobne deski
 # wg szczelin wykrytych na teksturze (krawedzie desek), z zachowaniem UV.
 import bpy, bmesh, math
+from . import jodelka as jd
 from mathutils import Vector, Matrix
 
 
@@ -338,129 +339,6 @@ def face_uv_affine(me, poly, uv):
 
 
 # ---------------------------------------------------------------- jodelka (skosne panele na siatce)
-def image_pixels(img, res=1024):
-    """jasnosc obrazu przeskalowanego do res x res (na kopii - obraz uzytkownika bez zmian)"""
-    import numpy as np
-    im = img.copy()
-    try:
-        if im.size[0] != res or im.size[1] != res:
-            im.scale(res, res)
-        w, h = im.size
-        px = np.empty(w * h * 4, dtype=np.float32)
-        im.pixels.foreach_get(px)
-    finally:
-        bpy.data.images.remove(im)
-    px = px.reshape(h, w, 4)
-    return 0.299 * px[..., 0] + 0.587 * px[..., 1] + 0.114 * px[..., 2]
-
-
-def seam_strength(lum):
-    """jak bardzo piksel jest ciemna, cienka linia (szczelina); druga tablica - z tolerancja 1 px"""
-    import numpy as np
-    dark = np.maximum(_box(lum, 3) - lum, 0)
-    m = dark.copy()
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            if dx or dy:
-                m = np.maximum(m, np.roll(np.roll(dark, dy, 0), dx, 1))
-    return dark, m
-
-
-def detect_grid(lum, dark):
-    """Siatka jodelki: dwa kierunki krawedzi (z histogramu gradientu), szerokosc deski (okres)
-    i przesuniecie linii. Zwraca (N1, N2, okres, faza1, faza2) w pikselach obrazu."""
-    import numpy as np
-    h, w = lum.shape
-    gx = np.roll(lum, -1, 1) - np.roll(lum, 1, 1)
-    gy = np.roll(lum, -1, 0) - np.roll(lum, 1, 0)
-    ang = (np.degrees(np.arctan2(gy, gx)) + 180) % 180
-    hist, _ = np.histogram(ang, bins=360, range=(0, 180), weights=gx * gx + gy * gy)
-    hs = np.convolve(np.concatenate([hist[-10:], hist, hist[:10]]), np.ones(21) / 21, 'same')[10:-10]
-    a1 = int(np.argmax(hs)); hs2 = hs.copy()
-    for d in range(-60, 61):
-        hs2[(a1 + d) % 360] = 0
-    a2 = int(np.argmax(hs2))
-    Ns = [np.array([math.cos(math.radians(a / 2)), math.sin(math.radians(a / 2))]) for a in (a1, a2)]
-    Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
-    Ts = [X * N[0] + Y * N[1] for N in Ns]
-    dflat = dark.ravel()
-
-    def comb(T, per):
-        b = np.floor((T.ravel() % per) / per * 48).astype(np.int64)
-        prof = np.bincount(b, weights=dflat, minlength=48) / np.maximum(np.bincount(b, minlength=48), 1)
-        k = int(np.argmax(prof))
-        return prof[k] - np.median(prof), (k + 0.5) / 48 * per
-    # okres z autokorelacji profilu, potem dokladnie grzebieniem wspolnym dla obu kierunkow
-    cands = []
-    for T in Ts:
-        tb = np.floor(T.ravel() * 2 - T.min() * 2).astype(np.int64)
-        prof = np.bincount(tb, weights=dflat) / np.maximum(np.bincount(tb), 1)
-        prof = prof - np.convolve(prof, np.ones(41) / 41, 'same')
-        ac = np.correlate(prof, prof, 'full')[len(prof) - 1:]
-        lo, hi = int(2 * w / 200), int(2 * w / 6)
-        seg = ac[lo:hi]
-        strong = [i for i in range(1, len(seg) - 1) if seg[i] >= seg[i - 1] and seg[i] >= seg[i + 1]
-                  and seg[i] > 0.5 * seg.max()]
-        cands.append((lo + (strong[0] if strong else int(np.argmax(seg)))) / 2)
-    base = min(cands)
-    best = None
-    for per in np.arange(base * 0.93, base * 1.07, 0.05):
-        (s1, f1), (s2, f2) = comb(Ts[0], per), comb(Ts[1], per)
-        if best is None or s1 + s2 > best[0]:
-            best = (s1 + s2, per, f1, f2)
-    return Ns[0], Ns[1], best[1], best[2], best[3]
-
-
-def herring_board(i, j, n, c, var):
-    """model jodelki na siatce (deska = n kratek): klucz deski zawierajacej kratke (i, j)"""
-    swap, sig = var
-    x, y = (j, i) if swap else (i, j)
-    y = sig * y
-    r = (x - y - c) % (2 * n)
-    if r < n:
-        return ('x', y, x - r)
-    return ('y', x, y - (2 * n - 1 - r))
-
-
-VARIANTS = ((0, 1), (0, -1), (1, 1), (1, -1))
-
-
-def fit_herringbone(smax, grid, n_user, var_user=None, c_user=-1):
-    """dopasuj przesuniecie i odbicie wzoru (oraz dlugosc, gdy n_user=0) do szczelin na teksturze:
-    przewidywane konce desek maja byc ciemne, przewidywane wnetrza desek - jasne"""
-    import numpy as np
-    h, w = smax.shape
-    N1, N2, per, p1, p2 = grid
-    Minv = np.linalg.inv(np.array([N1, N2]))
-    cor = np.array([[0, 0], [w, 0], [0, h], [w, h]], float)
-    t1 = cor @ N1; t2 = cor @ N2
-    I = range(int(math.floor((t1.min() - p1) / per)) - 1, int(math.ceil((t1.max() - p1) / per)) + 1)
-    J = range(int(math.floor((t2.min() - p2) / per)) - 1, int(math.ceil((t2.max() - p2) / per)) + 1)
-    fs = np.linspace(0.15, 0.85, 12)
-    e1, e2 = {}, {}
-    for i in I:
-        for j in J:
-            A = p1 + i * per; B = p2 + j * per
-            for (a0, b0, a1, b1), store in (((A, B, A, B + per), e1), ((A, B, A + per, B), e2)):
-                P = Minv @ np.array([a0 + (a1 - a0) * fs, b0 + (b1 - b0) * fs])
-                store[(i, j)] = float(smax[np.round(P[1]).astype(int) % h, np.round(P[0]).astype(int) % w].mean())
-    best = None
-    for n in ([n_user] if n_user else range(2, 17)):
-        for var in ([var_user] if var_user else VARIANTS):
-            for c in ([c_user % (2 * n)] if c_user >= 0 else range(2 * n)):
-                seam, inner = [], []
-                for (i, j), s in e1.items():
-                    (inner if herring_board(i, j, n, c, var) == herring_board(i - 1, j, n, c, var) else seam).append(s)
-                for (i, j), s in e2.items():
-                    (inner if herring_board(i, j, n, c, var) == herring_board(i, j - 1, n, c, var) else seam).append(s)
-                if not inner:
-                    continue
-                sc = sum(seam) / len(seam) - sum(inner) / len(inner)
-                if best is None or sc > best[0]:
-                    best = (sc, n, c, var)
-    return best
-
-
 def clip_convex(subject, clip):
     """Sutherland-Hodgman: wielokat subject przyciety do wypuklego wielokata clip (CCW)"""
     out = list(subject)
@@ -489,56 +367,38 @@ def clip_convex(subject, clip):
     return out
 
 
-def herring_layout(src, grid, model, size):
+def herring_layout(src, lat, model, size):
     """deski jodelki na plaszczyznie: {klucz: (kratki (i0,i1,j0,j1), kierunek wzdluz w UV)}"""
-    import numpy as np
-    N1, N2, per, p1, p2 = grid
-    _, n, c, var = model
-    w, h = size
     uv = src.data.uv_layers.active.data
     us = [l.uv[0] for l in uv]; vs = [l.uv[1] for l in uv]
-    cor = np.array([[min(us) * w, min(vs) * h], [max(us) * w, min(vs) * h],
-                    [min(us) * w, max(vs) * h], [max(us) * w, max(vs) * h]])
-    t1 = cor @ N1; t2 = cor @ N2
-    cells = {}
-    for i in range(int(math.floor((t1.min() - p1) / per)) - 1, int(math.ceil((t1.max() - p1) / per)) + 1):
-        for j in range(int(math.floor((t2.min() - p2) / per)) - 1, int(math.ceil((t2.max() - p2) / per)) + 1):
-            cells.setdefault(herring_board(i, j, n, c, var), []).append((i, j))
-    Minv = np.linalg.inv(np.array([N1, N2]))
-    boards = {}
-    for key, cl in cells.items():
-        i0 = min(q[0] for q in cl); i1 = max(q[0] for q in cl) + 1
-        j0 = min(q[1] for q in cl); j1 = max(q[1] for q in cl) + 1
-        d = Minv @ (np.array([per, 0.0]) if (i1 - i0) >= (j1 - j0) else np.array([0.0, per]))
-        boards[key] = ((i0, i1, j0, j1), (d[0] / w, d[1] / h))
-    return boards
+    boards = jd.layout(lat, model, (min(us), min(vs)), (max(us), max(vs)), size)
+    return {key: (r, jd.along_uv(lat, size, *r)) for key, r in boards.items()}
 
 
 def herring_fit_cached(cache, img, p):
-    """siatka + dopasowany model jodelki dla obrazu (raz na obraz i dlugosc deski)"""
+    """siatka + dopasowany model jodelki dla obrazu. Szczeliny ze wszystkich map materialu naraz
+    (AO, Cavity, Roughness, Specular, Displacement, Normal...), siatka z widma FFT, dlugosc deski,
+    wariant i przesuniecie - najlepsze dopasowanie do szczelin"""
     var = {"A": (0, 1), "B": (0, -1), "C": (1, 1), "D": (1, -1)}.get(p.herr_variant)
     key = ("h", img.name, p.herr_length, var, p.herr_offset)
     if key not in cache:
-        lum = image_pixels(img, 1024)
-        dark, smax = seam_strength(lum)
-        grid = detect_grid(lum, dark)
-        cache[key] = (grid, fit_herringbone(smax, grid, p.herr_length, var, p.herr_offset), lum.shape[::-1])
+        if ("S", img.name) not in cache:
+            S, used = jd.seam_map(img, 1024)
+            print("Przygotowanie desek - jodelka: mapy szczelin", used)
+            lat, _ = jd.detect_lattice(S)
+            cache[("S", img.name)] = (S, lat, jd.edge_scores(S, lat))
+        S, lat, (E1, E2, org) = cache[("S", img.name)]
+        k = lat[5]
+        off = None
+        if p.herr_offset >= 0:
+            n_off = 2 * k
+            off = (p.herr_offset // n_off, p.herr_offset % n_off)
+        model = jd.fit(E1, E2, org, k, p.herr_length, var, off)
+        cache[key] = (lat, model, S.shape[::-1])
     return cache[key]
 
 
-def cell_quad(grid, size, i0, i1, j0, j1, shrink):
-    """czworokat UV (CCW) prostokata kratek, pomniejszony o shrink (w kratkach) z kazdej strony"""
-    import numpy as np
-    N1, N2, per, p1, p2 = grid
-    w, h = size
-    Minv = np.linalg.inv(np.array([N1, N2]))
-    pts = []
-    for a, b in ((i0 + shrink, j0 + shrink), (i1 - shrink, j0 + shrink),
-                 (i1 - shrink, j1 - shrink), (i0 + shrink, j1 - shrink)):
-        P = Minv @ np.array([p1 + a * per, p2 + b * per])
-        pts.append((float(P[0] / w), float(P[1] / h)))
-    area = sum(pts[k - 1][0] * pts[k][1] - pts[k][0] * pts[k - 1][1] for k in range(4))   # >0 = CCW
-    return pts[::-1] if area < 0 else pts
+cell_quad = jd.cell_quad
 
 
 # ---------------------------------------------------------------- operator
@@ -616,7 +476,7 @@ class DESKI_OT_split(bpy.types.Operator):
             return 0
         # ile metrow ma jedna kratka (szerokosc deski) - do szczeliny miedzy deskami
         import numpy as np
-        N1, N2, per, p1, p2 = grid
+        N1, N2, per = grid[:3]
         Minv = np.linalg.inv(np.array([N1, N2]))
         d = Minv @ np.array([per, 0.0])
         fuv0, f30, _ = faces[0]
@@ -776,6 +636,12 @@ class DESKI_OT_split(bpy.types.Operator):
         for f in bm.faces:
             if f.normal.z < 0:
                 f.normal_flip()
+        # n-gony (deska przycieta skosnie brzegiem plaszczyzny) -> czworokaty + trojkat
+        ngons = [f for f in bm.faces if len(f.verts) > 4]
+        if ngons:
+            r = bmesh.ops.triangulate(bm, faces=ngons, ngon_method='BEAUTY')
+            bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.pi, angle_shape_threshold=math.pi,
+                                     cmp_uvs=False, cmp_materials=True)
         bm.faces.ensure_lookup_table()
         nrm = bm.faces[0].normal.copy()
         # uklad deski: X wzdluz deski, Z normalna plaszczyzny (dla desek prostych - uklad plaszczyzny)
@@ -872,14 +738,14 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
         ('HERRINGBONE', "Jodelka (skosne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
                                             "dlugosc deski podajesz recznie")))
     herr_length: bpy.props.IntProperty(name="Dlugosc deski (w szerokosciach)", default=0, min=0, max=30,
-                                       description="Ile szerokosci deski ma jej dlugosc. 0 = zgadnij z tekstury "
-                                                   "(niepewne - najlepiej sprawdz Podgladem i wpisz recznie)")
+                                       description="Ile szerokosci deski ma jej dlugosc. 0 = dobierz z tekstury "
+                                                   "(najlepsze dopasowanie do szczelin, 3..12) - sprawdz Podgladem")
     herr_variant: bpy.props.EnumProperty(name="Wariant wzoru", default='AUTO', items=(
         ('AUTO', "Auto", "Dopasuj do tekstury"), ('A', "A", ""), ('B', "B (odbity)", ""),
         ('C', "C (obrocony)", ""), ('D', "D (obrocony, odbity)", "")),
         description="Orientacja jodelki. Gdy Auto nie trafia - przestaw i sprawdz Podgladem")
     herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
-                                       description="Przesuniecie jodelki w kratkach (szerokosciach deski). "
+                                       description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
                                                    "-1 = dopasuj do tekstury")
     sensitivity: bpy.props.FloatProperty(name="Czulosc (odchylenia)", default=4.0, min=1.0, max=20.0,
                                          description="Jak wyrazna musi byc ciemna linia, by uznac ja za szczeline. "

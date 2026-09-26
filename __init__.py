@@ -15,11 +15,12 @@ bl_info = {
 
 if "bpy" in locals():
     import importlib
+    importlib.reload(jodelka)
     importlib.reload(przygotowanie)
     importlib.reload(wyrwanie)
     importlib.reload(detale)
 else:
-    from . import przygotowanie, wyrwanie, detale
+    from . import jodelka, przygotowanie, wyrwanie, detale
 
 import bpy
 

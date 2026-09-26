@@ -502,6 +502,12 @@ class DESKI_OT_deform(bpy.types.Operator):
             bmesh.ops.bevel(bm, geom=edges, offset=off, offset_type='OFFSET', segments=segments,
                             profile=0.5, affect='EDGES', clamp_overlap=False, loop_slide=True,
                             miter_outer='SHARP', miter_inner='SHARP')
+        # bevel na krotkiej/skosnej desce potrafi zostawic 5-kat -> czworokat + trojkat
+        ngons = [f for f in bm.faces if len(f.verts) > 4]
+        if ngons:
+            r = bmesh.ops.triangulate(bm, faces=ngons, ngon_method='BEAUTY')
+            bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.radians(10),
+                                     angle_shape_threshold=math.pi, cmp_uvs=True, cmp_materials=True)
         if smooth:
             # gladkie cieniowanie zgiecia; krawedzie deski (> 30 st.) zostaja ostre
             for e in bm.edges:
