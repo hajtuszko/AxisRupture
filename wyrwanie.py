@@ -155,19 +155,18 @@ class Board:
         return self.F @ Vector((q.x, y, q.y - self.T / 2)) + self.shift
 
 
-# ---------------------------------------------------------------- operator
-class DESKI_OT_deform(bpy.types.Operator):
-    bl_idname = "object.deski_teren_deform"
-    bl_label = "Wyrwij deski terenem"
-    bl_description = ("Wygina i wyrywa deski z kolekcji tak, jak zrobilby to teren wypychajacy "
-                      "je od spodu do swojej obecnej (docelowej) pozycji")
-    bl_options = {'REGISTER', 'UNDO'}
+# ---------------------------------------------------------------- rdzen (bez operatora - wolany tez z podgladu na zywo)
+class Settings:
+    """ustawienia z nadpisaniami (np. jakosc podgladu): Settings(p, bevel_segments=2).bevel_segments"""
+    def __init__(self, p, **over):
+        self.__dict__["_p"] = p; self.__dict__["_o"] = over
 
-    @classmethod
-    def poll(cls, context):
-        p = context.scene.deski_teren
-        return p.terrain is not None and p.boards is not None
+    def __getattr__(self, k):
+        o = self.__dict__["_o"]
+        return o[k] if k in o else getattr(self.__dict__["_p"], k)
 
+
+class DeformCore:
     # --- teren
     def terrain_bvh(self, context, terrain):
         dg = context.evaluated_depsgraph_get()
@@ -572,8 +571,9 @@ class DESKI_OT_deform(bpy.types.Operator):
                         tbad += 1; break
         return bad, worst, tbad
 
-    def execute(self, context):
-        p = context.scene.deski_teren
+    def run(self, context, p, remove_rigidbody=True):
+        """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
+        self.moved = []
         terrain, coll = p.terrain, p.boards
         self.terrain_bvh(context, terrain)
         boards, skipped = [], []
@@ -588,10 +588,11 @@ class DESKI_OT_deform(bpy.types.Operator):
             b.setup(p.segment_length, p.nail_position)
             boards.append(b)
         if not boards:
-            self.report({'ERROR'}, "Brak desek do przetworzenia"); return {'CANCELLED'}
+            return 'ERROR', "Brak desek do przetworzenia"
         moved = [b for b in boards if self.simulate(b, p)]
+        self.moved = [b.o for b in moved]
         if not moved:
-            self.report({'WARNING'}, "Teren nie dochodzi do zadnej deski"); return {'CANCELLED'}
+            return 'WARNING', "Teren nie dochodzi do zadnej deski"
         EPS = self._eps = p.clearance
         for b in moved:
             if b.phase >= 2:
@@ -628,15 +629,8 @@ class DESKI_OT_deform(bpy.types.Operator):
             if b.phase >= 2:
                 b.shift += Vector((0, 0, self.lift(b, EPS)))
         # usun Rigid Body (inaczej symulacja nadpisze ulozenie)
-        if p.remove_rigidbody:
-            vl = context.view_layer; prev = vl.objects.active
-            for b in boards:
-                if b.o.rigid_body and b.o.name in vl.objects:
-                    hs = b.o.hide_get(); b.o.hide_set(False)
-                    vl.objects.active = b.o
-                    bpy.ops.rigidbody.object_remove()
-                    b.o.hide_set(hs)
-            vl.objects.active = prev
+        if p.remove_rigidbody and remove_rigidbody:
+            remove_rigid_bodies(context, [b.o for b in boards])
         stats = {"prosta": 0, "wygieta": 0}
         for b in moved:
             # gwozdzie (dla modulu Detale): gora i spod deski w miejscu gwozdzia + czy puscil
@@ -669,13 +663,57 @@ class DESKI_OT_deform(bpy.types.Operator):
             context.view_layer.update()
             bad, worst, tbad = self.verify(context, boards, {b.o.name for b in moved})
             msg += f" | kontrola: przenikania deska-deska >2mm: {bad} (max {worst * 1000:.1f} mm), w terenie: {tbad}"
-        self.report({'WARNING'} if (skipped or (p.verify and (bad or tbad))) else {'INFO'}, msg)
         for s in skipped:
             print("Deski - pominieta:", s)
-        return {'FINISHED'}
+        return ('WARNING' if (skipped or (p.verify and (bad or tbad))) else 'INFO'), msg
+
+
+def remove_rigid_bodies(context, objs):
+    """usun Rigid Body (inaczej symulacja nadpisze ulozenie); dziala tez poza operatorem"""
+    vl = context.view_layer
+    for o in objs:
+        if o.rigid_body and o.name in vl.objects:
+            hs = o.hide_get(); o.hide_set(False)
+            with context.temp_override(object=o, active_object=o, selected_objects=[o]):
+                bpy.ops.rigidbody.object_remove()
+            o.hide_set(hs)
+
+
+class DESKI_OT_deform(DeformCore, bpy.types.Operator):
+    bl_idname = "object.deski_teren_deform"
+    bl_label = "Wyrwij deski terenem"
+    bl_description = ("Wygina i wyrywa deski z kolekcji tak, jak zrobilby to teren wypychajacy "
+                      "je od spodu do swojej obecnej (docelowej) pozycji")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.deski_teren
+        pg = getattr(context.scene, "deski_podglad", None)
+        return p.terrain is not None and p.boards is not None and not (pg and pg.active)
+
+    def execute(self, context):
+        lvl, msg = self.run(context, context.scene.deski_teren)
+        self.report({lvl}, msg)
+        return {'CANCELLED'} if lvl == 'ERROR' or not self.moved else {'FINISHED'}
 
 
 # ---------------------------------------------------------------- ustawienia + panel
+
+def _live(self, context):
+    from . import podglad
+    podglad.live_update(self, context)
+
+
+def add_live_updates(cls, skip=()):
+    """kazda zmiana ustawienia -> przeliczenie podgladu na zywo (jesli wlaczony)"""
+    ann = cls.__annotations__
+    for k, d in list(ann.items()):
+        if k in skip or not hasattr(d, "keywords") or "update" in d.keywords:
+            continue
+        ann[k] = d.function(**dict(d.keywords, update=_live))
+
+
 def mesh_poll(self, o):
     return o.type == 'MESH'
 
@@ -716,6 +754,9 @@ class DeskiSettings(bpy.types.PropertyGroup):
     verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
 
 
+add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody"))
+
+
 class DESKI_PT_panel(bpy.types.Panel):
     bl_label = "Wyrwanie desek"
     bl_idname = "DESKI_PT_panel"
@@ -725,9 +766,11 @@ class DESKI_PT_panel(bpy.types.Panel):
     bl_order = 1
 
     def draw(self, context):
+        from . import podglad
         p = context.scene.deski_teren
         col = self.layout.column()
         col.prop(p, "terrain"); col.prop(p, "boards")
+        podglad.draw_live(col, context)
         col.separator()
         col.prop(p, "seed"); col.prop(p, "nail_position")
         box = col.box(); box.label(text="Progi zerwania gwozdzi")

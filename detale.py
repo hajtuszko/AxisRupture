@@ -171,7 +171,7 @@ def crack_board(bm, L, W, T, rng, p):
     # poszarpana linia: przesuniecie wzdluz deski zalezne od polozenia w poprzek
     ys = sorted({round(v.co.y, 5) for v in ring_v})
     off = {y: rng.uniform(-1, 1) * amp for y in ys}
-    for v in ring_v:
+    for v in sorted(ring_v, key=lambda v: (round(v.co.y, 5), round(v.co.z, 5), round(v.co.x, 5))):  # stala kolejnosc losowan
         v.co.x += off[round(v.co.y, 5)] + rng.uniform(-0.1, 0.1) * amp
     bmesh.ops.split_edges(bm, edges=ring)
     bnd = [e for e in bm.edges if e.is_boundary]
@@ -279,20 +279,10 @@ def nail_mesh(p):
 
 
 # ---------------------------------------------------------------- operator
-class DESKI_OT_details(bpy.types.Operator):
-    bl_idname = "object.deski_detale"
-    bl_label = "Dodaj detale"
-    bl_description = ("Nierownosci nietknietych desek, drzazgi i odksztalcenie wyrwanych desek, "
-                      "gwozdzie wyrwane razem z deskami")
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return (context.scene.deski_detale.boards or context.scene.deski_teren.boards) is not None
-
-    def execute(self, context):
-        p = context.scene.deski_detale
-        coll = p.boards or context.scene.deski_teren.boards
+class DetailCore:
+    def run(self, context, p, coll=None):
+        """caly etap 3; zwraca (poziom, komunikat)"""
+        coll = coll or p.boards or context.scene.deski_teren.boards
         terrain = context.scene.deski_teren.terrain
         self.TB = None
         if terrain:
@@ -347,8 +337,10 @@ class DESKI_OT_details(bpy.types.Operator):
             for o in boards:
                 if o.get("deski_gwozdzie") and not o.get("deski_gwozdzie_dodane"):
                     if nails_coll is None:
-                        nails_coll = bpy.data.collections.new(coll.name + " - gwozdzie")
-                        context.scene.collection.children.link(nails_coll)
+                        nails_coll = bpy.data.collections.get(coll.name + " - gwozdzie")
+                        if nails_coll is None:
+                            nails_coll = bpy.data.collections.new(coll.name + " - gwozdzie")
+                            context.scene.collection.children.link(nails_coll)
                     rng = random.Random(p.seed * 104729 + zlib.crc32(o.name.encode()))
                     st["gwozdzie"] += self.nails(o, rng, p, nails_coll)
                     o["deski_gwozdzie_dodane"] = 1
@@ -358,8 +350,7 @@ class DESKI_OT_details(bpy.types.Operator):
             msg += f", cofniete (kolizja z sasiednia deska) {reverted}"
         if st["pominiete"]:
             msg += f", pominiete (juz maja detale) {st['pominiete']}"
-        self.report({'INFO'}, msg)
-        return {'FINISHED'}
+        return 'INFO', msg
 
     # --- kontrola: zmienione deski, ktore przenikaja sasiednie o wiecej niz 1 mm
     def penetrating(self, boards, changed):
@@ -520,10 +511,30 @@ class DESKI_OT_details(bpy.types.Operator):
                 continue                               # czubek bylby w terenie / podlodze - pomijamy
             nob = bpy.data.objects.new(o.name + "_Gwozdz", me)
             coll.objects.link(nob)
+            nob["deski_gwozdz"] = 1
             nob.parent = o
             nob.matrix_world = M
             made += 1
         return made
+
+
+class DESKI_OT_details(DetailCore, bpy.types.Operator):
+    bl_idname = "object.deski_detale"
+    bl_label = "Dodaj detale"
+    bl_description = ("Nierownosci nietknietych desek, drzazgi i odksztalcenie wyrwanych desek, "
+                      "gwozdzie wyrwane razem z deskami")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        pg = getattr(context.scene, "deski_podglad", None)
+        return ((context.scene.deski_detale.boards or context.scene.deski_teren.boards) is not None
+                and not (pg and pg.active))
+
+    def execute(self, context):
+        lvl, msg = self.run(context, context.scene.deski_detale)
+        self.report({lvl}, msg)
+        return {'FINISHED'}
 
 
 # ---------------------------------------------------------------- ustawienia + panel
@@ -565,6 +576,10 @@ class DeskiDetailSettings(bpy.types.PropertyGroup):
     nail_diameter: bpy.props.FloatProperty(name="Srednica", default=0.003, min=0.0005, unit='LENGTH')
     nail_head: bpy.props.FloatProperty(name="Srednica lba", default=0.008, min=0.001, unit='LENGTH')
     nail_tilt: bpy.props.FloatProperty(name="Maks. odchylenie (st.)", default=20.0, min=0.0, max=80.0)
+
+
+from .wyrwanie import add_live_updates
+add_live_updates(DeskiDetailSettings, skip=("boards",))
 
 
 class DESKI_PT_details(bpy.types.Panel):
