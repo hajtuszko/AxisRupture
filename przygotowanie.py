@@ -367,24 +367,29 @@ def clip_convex(subject, clip):
     return out
 
 
-def herring_layout(src, lat, model, size):
-    """deski jodelki na plaszczyznie: {klucz: (kratki (i0,i1,j0,j1), kierunek wzdluz w UV)}"""
+def herring_layout(src, grid, model, size):
+    """deski jodelki na plaszczyznie: {klucz: (kratki (i0,i1,j0,j1), kierunek wzdluz w UV)}.
+    grid = (N1, N2, u, faza1, faza2, k, pole_korekty)"""
+    lat, field = grid[:6], grid[6]
     uv = src.data.uv_layers.active.data
     us = [l.uv[0] for l in uv]; vs = [l.uv[1] for l in uv]
     boards = jd.layout(lat, model, (min(us), min(vs)), (max(us), max(vs)), size)
-    return {key: (r, jd.along_uv(lat, size, *r)) for key, r in boards.items()}
+    return {key: (r, jd.along_uv(lat, size, *r, field=field)) for key, r in boards.items()}
 
 
 def herring_fit_cached(cache, img, p):
-    """siatka + dopasowany model jodelki dla obrazu. Szczeliny ze wszystkich map materialu naraz
-    (AO, Cavity, Roughness, Specular, Displacement, Normal...), siatka z widma FFT, dlugosc deski,
-    wariant i przesuniecie - najlepsze dopasowanie do szczelin"""
+    """Jodelka z tekstury, w trzech krokach:
+    1) mapa szczelin ze wszystkich map materialu (AO, Cavity, Roughness, Specular, Displacement, Normal...),
+    2) globalna siec z widma (kat, szerokosc) + dopasowanie dlugosci, wariantu i przesuniecia,
+    3) kalibracja lokalna: pomiar kazdego odcinka szczeliny i gladkie pole korekty z pewnych pomiarow
+       (zdjecie nie jest idealna siatka). Zwraca (grid, model, size)."""
     var = {"A": (0, 1), "B": (0, -1), "C": (1, 1), "D": (1, -1)}.get(p.herr_variant)
-    key = ("h", img.name, p.herr_length, var, p.herr_offset)
+    key = ("h", img.name, p.herr_length, var, p.herr_offset, p.herr_calibrate)
     if key not in cache:
         if ("S", img.name) not in cache:
-            S, used = jd.seam_map(img, 1024)
-            print("Przygotowanie desek - jodelka: mapy szczelin", used)
+            res = 2048 if max(img.size) >= 2048 else 1024
+            S, used = jd.seam_map(img, res)
+            print("Przygotowanie desek - jodelka: mapy szczelin", used, "rozdzielczosc", res)
             lat, _ = jd.detect_lattice(S)
             cache[("S", img.name)] = (S, lat, jd.edge_scores(S, lat))
         S, lat, (E1, E2, org) = cache[("S", img.name)]
@@ -394,11 +399,16 @@ def herring_fit_cached(cache, img, p):
             n_off = 2 * k
             off = (p.herr_offset // n_off, p.herr_offset % n_off)
         model = jd.fit(E1, E2, org, k, p.herr_length, var, off)
-        cache[key] = (lat, model, S.shape[::-1])
+        field = None
+        if p.herr_calibrate:
+            field = jd.calibrate(S, lat, model)
+            print("Przygotowanie desek - jodelka: kalibracja lokalna (px)", field["stats"])
+        cache[key] = (tuple(lat) + (field,), model, S.shape[::-1])
     return cache[key]
 
 
-cell_quad = jd.cell_quad
+def cell_quad(grid, size, i0, i1, j0, j1, shrink):
+    return jd.cell_quad(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
 
 
 # ---------------------------------------------------------------- operator
@@ -744,6 +754,9 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
         ('AUTO', "Auto", "Dopasuj do tekstury"), ('A', "A", ""), ('B', "B (odbity)", ""),
         ('C', "C (obrocony)", ""), ('D', "D (obrocony, odbity)", "")),
         description="Orientacja jodelki. Gdy Auto nie trafia - przestaw i sprawdz Podgladem")
+    herr_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
+                                           description="Dopasuj kazda szczeline osobno (zdjecie nie jest idealna siatka): "
+                                                       "pewne szczeliny koryguja polozenie, slabo widoczne sa interpolowane")
     herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
                                        description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
                                                    "-1 = dopasuj do tekstury")
@@ -796,6 +809,7 @@ class DESKI_PT_prep(bpy.types.Panel):
         box = col.box(); box.label(text="Wykrywanie szczelin")
         if herr:
             box.prop(p, "herr_length"); box.prop(p, "herr_variant"); box.prop(p, "herr_offset")
+            box.prop(p, "herr_calibrate")
             box.label(text="Kat i szerokosc desek - automatycznie", icon='INFO')
             box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
         else:
