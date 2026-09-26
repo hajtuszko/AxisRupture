@@ -1,6 +1,7 @@
 # Deski - dodatek do Blendera (4.2+ / 5.x)
 # przygotowanie.py - Przygotowanie desek: podzial plaszczyzny podlogi na deski wg szczelin na teksturze
 # wyrwanie.py      - Wyrwanie desek: wyginanie / wyrywanie przybitych desek przez teren
+# detale.py        - Detale desek: nierownosci, drzazgi, odksztalcenie wyrwanych desek, gwozdzie
 # Uzycie: View3D > Sidebar (N) > zakladka "Deski"
 bl_info = {
     "name": "Deski: wyrwanie przez teren",
@@ -14,14 +15,16 @@ bl_info = {
 
 if "bpy" in locals():
     import importlib
+    importlib.reload(jodelka)
     importlib.reload(przygotowanie)
     importlib.reload(wyrwanie)
+    importlib.reload(detale)
 else:
-    from . import przygotowanie, wyrwanie
+    from . import jodelka, przygotowanie, wyrwanie, detale
 
 import bpy
 
-modules = (przygotowanie, wyrwanie)
+modules = (przygotowanie, wyrwanie, detale)
 
 
 def register():

@@ -1,6 +1,7 @@
 # Etap 2: przygotowanie desek - podzial plaszczyzny podlogi na osobne deski
 # wg szczelin wykrytych na teksturze (krawedzie desek), z zachowaniem UV.
 import bpy, bmesh, math
+from . import jodelka as jd
 from mathutils import Vector, Matrix
 
 
@@ -116,20 +117,175 @@ def detect_planks(lum, sens=4.0, min_width=0.015, min_length=0.05, cover=0.6, co
     return axis, seams, bands
 
 
-def find_texture(obj, override=None):
-    """obraz do analizy: wskazany recznie, albo z materialu - najlepiej AO / Cavity, potem Base Color"""
-    if override:
-        return override
+def _box(a, rad):
+    """srednia w oknie (2*rad+1)^2, cyklicznie (tekstura sie powtarza)"""
+    import numpy as np
+    k = 2 * rad + 1
+    c = np.cumsum(np.cumsum(np.pad(a, ((rad + 1, rad), (rad + 1, rad)), mode='wrap'), 0), 1)
+    return (c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]) / (k * k)
+
+
+def detect_nail_dots(img, cool_thr=-0.06, dark_thr=0.08):
+    """lebki gwozdzi na teksturze koloru: male, ciemne, chlodne (szaroniebieskie) punkty na brazowym drewnie.
+    Zwraca liste (u, v) w 0..1."""
+    import numpy as np
+    w, h = img.size
+    px = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(h, w, 4)
+    r, g, b = px[..., 0], px[..., 1], px[..., 2]
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    cool = b - r                                       # drewno ujemne, stal blisko zera
+    dark = _box(lum, 6) - lum                          # ciemniejszy od otoczenia
+    score = cool + dark
+    m = score.copy()
+    for dy in range(-3, 4):                            # lokalne maksimum w oknie 7x7
+        for dx in range(-3, 4):
+            if dx or dy:
+                m = np.maximum(m, np.roll(np.roll(score, dy, 0), dx, 1))
+    pts = np.argwhere((score == m) & (cool > cool_thr) & (dark > dark_thr))
+    return [((x + 0.5) / w, (y + 0.5) / h) for y, x in pts]
+
+
+def face_material(obj, poly):
+    """material faktycznie widoczny na scianie: slot z indeksu sciany (link Object albo Data)"""
+    slots = obj.material_slots
+    return slots[poly.material_index].material if poly.material_index < len(slots) else None
+
+
+def used_materials(obj):
+    """materialy uzyte na scianach obiektu, od najczesciej uzywanego"""
+    from collections import Counter
+    cnt = Counter(face_material(obj, p) for p in obj.data.polygons)
+    return [m for m, _ in cnt.most_common() if m is not None]
+
+
+def _images(obj):
+    """obrazy z materialow rzeczywiscie uzytych na plaszczyznie (nie ze wszystkich slotow)"""
     imgs = []
-    for slot in obj.material_slots:
-        m = slot.material
-        if m and m.node_tree:
+    for m in used_materials(obj):
+        if m.node_tree:
             imgs += [n.image for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image]
-    for key in ("_ao", "ambient", "occlusion", "cavity", "basecolor", "base_color", "albedo", "diffuse", "color"):
+    return imgs
+
+
+def _pick(imgs, keys):
+    for key in keys:
         for im in imgs:
             if key in (im.name + im.filepath).lower().replace(" ", ""):
                 return im
-    return imgs[0] if imgs else None
+    return None
+
+
+def find_texture(obj, override=None):
+    """obraz do szczelin: wskazany recznie, albo z materialu - najlepiej AO / Cavity, potem Base Color"""
+    if override:
+        return override
+    imgs = _images(obj)
+    return _pick(imgs, ("_ao", "ambient", "occlusion", "cavity", "basecolor", "base_color", "albedo",
+                        "diffuse", "color")) or (imgs[0] if imgs else None)
+
+
+def find_color_texture(obj, override=None):
+    """obraz do gwozdzi: kolor (lebki gwozdzi odrozniaja sie kolorem od drewna)"""
+    if override:
+        return override
+    return _pick(_images(obj), ("basecolor", "base_color", "albedo", "diffuse", "color"))
+
+
+def point_in_poly(pt, poly):
+    x, y = pt; inside = False
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (y - y0) * (x1 - x0) / (y1 - y0):
+            inside = not inside
+    return inside
+
+
+# ---------------------------------------------------------------- UV bokow i czol deski
+def fit_top_uv(samples):
+    """UV wierzchu deski jako funkcja liniowa polozenia na wierzchu: uv = c + A*(x, y).
+    samples = [((x, y), (u, v))] w ukladzie, w ktorym wierzch lezy w plaszczyznie xy."""
+    import numpy as np
+    if len(samples) < 3:
+        return None
+    X = np.array([[x, y, 1.0] for (x, y), _ in samples])
+    U = np.array([uv for _, uv in samples])
+    coef, *_ = np.linalg.lstsq(X, U, rcond=None)
+    return lambda x, y: (coef[0][0] * x + coef[1][0] * y + coef[2][0], coef[0][1] * x + coef[1][1] * y + coef[2][1])
+
+
+def top_outline(top_faces, to_frame):
+    """krawedzie obrysu wierzchu deski (w ukladzie wierzchu, 2D)"""
+    tops = set(top_faces)
+    segs = []
+    for f in top_faces:
+        for e in f.edges:
+            if sum(1 for g in e.link_faces if g in tops) == 1:
+                a, b = to_frame(e.verts[0].co, False), to_frame(e.verts[1].co, False)
+                segs.append((Vector((a.x, a.y)), Vector((b.x, b.y))))
+    return segs
+
+
+def _nearest_on(segs, q):
+    best, bd = None, 1e18
+    for a, b in segs:
+        ab = b - a
+        t = 0.0 if ab.length_squared < 1e-18 else max(0.0, min(1.0, (q - a).dot(ab) / ab.length_squared))
+        c = a + ab * t
+        d = (q - c).length_squared
+        if d < bd:
+            best, bd = c, d
+    return best
+
+
+def unfold_uv(faces, uvl, to_frame, uvf, z_top, segs=None):
+    """Rozklada UV scian bocznych (boki, czola, fazy, pekniecia) i spodu przez 'zagiecie' wierzchu:
+    punkt dostaje UV punktu wierzchu lezacego w glab deski od najblizszej krawedzi obrysu, w odleglosci
+    rownej drodze po powierzchni (odsuniecie w poziomie + glebokosc). Tekstura przechodzi przez krawedz
+    bez szwu, z ta sama gestoscia co na wierzchu i bez ciemnej szczeliny sasiedniej deski. Spod - rzut."""
+    for f in faces:
+        n = to_frame(f.normal, True)
+        h = Vector((n.x, n.y)); hl = h.length
+        for lp in f.loops:
+            q = to_frame(lp.vert.co, False)
+            q2 = Vector((q.x, q.y))
+            d = max(0.0, z_top - q.z)
+            if hl > 0.2 and n.z < 0.9:
+                hn = h / hl
+                edge = _nearest_on(segs, q2) if segs else None
+                if edge is not None:
+                    off = max(0.0, (q2 - edge).dot(hn))            # jak daleko na zewnatrz obrysu
+                    p = edge - hn * (off + d)
+                else:
+                    p = q2 - hn * d
+                x, y = p.x, p.y
+            else:
+                x, y = q.x, q.y
+            lp[uvl].uv = uvf(x, y)
+
+
+def board_uv_frame(nrm, origin):
+    """uklad z wierzchem deski w plaszczyznie xy (z = normalna wierzchu)"""
+    e3 = nrm.normalized(); e1 = e3.orthogonal().normalized(); e2 = e3.cross(e1)
+    M = Matrix((e1, e2, e3))
+
+    def to_frame(v, is_dir):
+        return M @ v if is_dir else M @ (v - origin)
+    return to_frame
+
+
+def fix_side_uvs(bm, uvl, to_frame, top_faces, other_faces):
+    """dopasuj UV wierzchu i rozloz wg niego pozostale sciany"""
+    z_top = max(to_frame(v.co, False).z for f in top_faces for v in f.verts)
+    samples = []
+    for f in top_faces:
+        for lp in f.loops:
+            q = to_frame(lp.vert.co, False)
+            samples.append(((q.x, q.y), tuple(lp[uvl].uv)))
+    uvf = fit_top_uv(samples)
+    if uvf:
+        unfold_uv(other_faces, uvl, to_frame, uvf, z_top, top_outline(top_faces, to_frame))
+    return uvf
 
 
 # ---------------------------------------------------------------- geometria
@@ -182,6 +338,79 @@ def face_uv_affine(me, poly, uv):
     return lambda u, v: P[0] + a * (u - T[0].x) + b * (v - T[0].y), a.length, b.length
 
 
+# ---------------------------------------------------------------- jodelka (skosne panele na siatce)
+def clip_convex(subject, clip):
+    """Sutherland-Hodgman: wielokat subject przyciety do wypuklego wielokata clip (CCW)"""
+    out = list(subject)
+    for k in range(len(clip)):
+        a, b = clip[k], clip[(k + 1) % len(clip)]
+
+        def inside(q):
+            return (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]) >= 0
+
+        def inter(q0, q1):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            den = (q1[0] - q0[0]) * dy - (q1[1] - q0[1]) * dx
+            t = ((a[0] - q0[0]) * dy - (a[1] - q0[1]) * dx) / den if abs(den) > 1e-15 else 0.0
+            return (q0[0] + (q1[0] - q0[0]) * t, q0[1] + (q1[1] - q0[1]) * t)
+        pts, out = out, []
+        for i, cur in enumerate(pts):
+            prev = pts[i - 1]
+            if inside(cur):
+                if not inside(prev):
+                    out.append(inter(prev, cur))
+                out.append(cur)
+            elif inside(prev):
+                out.append(inter(prev, cur))
+        if not out:
+            break
+    return out
+
+
+def herring_layout(src, grid, model, size):
+    """deski jodelki na plaszczyznie: {klucz: (kratki (i0,i1,j0,j1), kierunek wzdluz w UV)}.
+    grid = (N1, N2, u, faza1, faza2, k, pole_korekty)"""
+    lat, field = grid[:6], grid[6]
+    uv = src.data.uv_layers.active.data
+    us = [l.uv[0] for l in uv]; vs = [l.uv[1] for l in uv]
+    boards = jd.layout(lat, model, (min(us), min(vs)), (max(us), max(vs)), size)
+    return {key: (r, jd.along_uv(lat, size, *r, field=field)) for key, r in boards.items()}
+
+
+def herring_fit_cached(cache, img, p):
+    """Jodelka z tekstury, w trzech krokach:
+    1) mapa szczelin ze wszystkich map materialu (AO, Cavity, Roughness, Specular, Displacement, Normal...),
+    2) globalna siec z widma (kat, szerokosc) + dopasowanie dlugosci, wariantu i przesuniecia,
+    3) kalibracja lokalna: pomiar kazdego odcinka szczeliny i gladkie pole korekty z pewnych pomiarow
+       (zdjecie nie jest idealna siatka). Zwraca (grid, model, size)."""
+    var = {"A": (0, 1), "B": (0, -1), "C": (1, 1), "D": (1, -1)}.get(p.herr_variant)
+    key = ("h", img.name, p.herr_length, var, p.herr_offset, p.herr_calibrate)
+    if key not in cache:
+        if ("S", img.name) not in cache:
+            res = 2048 if max(img.size) >= 2048 else 1024
+            S, used = jd.seam_map(img, res)
+            print("Przygotowanie desek - jodelka: mapy szczelin", used, "rozdzielczosc", res)
+            lat, _ = jd.detect_lattice(S)
+            cache[("S", img.name)] = (S, lat, jd.edge_scores(S, lat))
+        S, lat, (E1, E2, org) = cache[("S", img.name)]
+        k = lat[5]
+        off = None
+        if p.herr_offset >= 0:
+            n_off = 2 * k
+            off = (p.herr_offset // n_off, p.herr_offset % n_off)
+        model = jd.fit(E1, E2, org, k, p.herr_length, var, off)
+        field = None
+        if p.herr_calibrate:
+            field = jd.calibrate(S, lat, model)
+            print("Przygotowanie desek - jodelka: kalibracja lokalna (px)", field["stats"])
+        cache[key] = (tuple(lat) + (field,), model, S.shape[::-1])
+    return cache[key]
+
+
+def cell_quad(grid, size, i0, i1, j0, j1, shrink):
+    return jd.cell_quad(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
+
+
 # ---------------------------------------------------------------- operator
 class DESKI_OT_split(bpy.types.Operator):
     bl_idname = "object.deski_przygotuj"
@@ -206,19 +435,37 @@ class DESKI_OT_split(bpy.types.Operator):
         for src in src_objs:
             img = find_texture(src, p.texture)
             if img is None:
-                msgs.append(f"{src.name}: brak tekstury"); continue
+                msgs.append(f"{src.name}: brak tekstury (wskaz ja w polu Tekstura)"); continue
+            if img.size[0] == 0:
+                self.report({'ERROR'}, f"Nie mozna wczytac obrazu {img.name} ({img.filepath})")
+                return {'CANCELLED'}
+            if p.layout == 'HERRINGBONE':
+                grid, model, size = herring_fit_cached(cache, img, p)
+                n = self.split_herringbone(src, out, grid, model, size, p)
+                total += n
+                msgs.append(f"{src.name}: {n} desek jodelki ({img.name}, szerokosc {grid[2]:.1f} px, "
+                            f"dlugosc {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]})")
+                if p.hide_source:
+                    src.hide_set(True); src.hide_render = True
+                continue
             if img.name not in cache:
-                if img.size[0] == 0:
-                    self.report({'ERROR'}, f"Nie mozna wczytac obrazu {img.name} ({img.filepath})")
-                    return {'CANCELLED'}
                 cache[img.name] = detect_planks(image_luminance(img), p.sensitivity, p.min_width,
                                                 p.min_length, p.joint_cover, p.joint_contrast)
             axis, seams, bands = cache[img.name]
             if len(seams) < 2:
                 msgs.append(f"{src.name}: nie wykryto szczelin na {img.name}"); continue
-            n = self.split_object(context, src, out, axis, bands, p)
+            dots, cimg = [], None
+            if p.detect_nails:
+                cimg = find_color_texture(src, p.nail_texture)
+                if cimg is not None and cimg.size[0] > 0:
+                    if ("n", cimg.name) not in cache:
+                        cache[("n", cimg.name)] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
+                    dots = cache[("n", cimg.name)]
+            n, nn = self.split_object(context, src, out, axis, bands, p, dots)
             total += n
-            msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})")
+            msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
+                        + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
+                           (", gwozdzie: brak tekstury koloru" if p.detect_nails else "")))
             if p.hide_source:
                 src.hide_set(True); src.hide_render = True
         for m in msgs:
@@ -226,10 +473,51 @@ class DESKI_OT_split(bpy.types.Operator):
         self.report({'INFO'} if total else {'WARNING'}, f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs))
         return {'FINISHED'} if total else {'CANCELLED'}
 
-    def split_object(self, context, src, out, axis, bands, p):
+    def split_herringbone(self, src, out, grid, model, size, p):
+        """plaszczyzna -> deski jodelki (kazda deska z obrotem zgodnym z jej kierunkiem)"""
+        me = src.data
+        uv = me.uv_layers.active.data
+        faces = []
+        for poly in me.polygons:
+            aff = face_uv_affine(me, poly, uv)
+            if aff:
+                faces.append(([tuple(uv[l].uv) for l in poly.loop_indices], aff[0], face_material(src, poly)))
+        if not faces:
+            return 0
+        # ile metrow ma jedna kratka (szerokosc deski) - do szczeliny miedzy deskami
+        import numpy as np
+        N1, N2, per = grid[:3]
+        Minv = np.linalg.inv(np.array([N1, N2]))
+        d = Minv @ np.array([per, 0.0])
+        fuv0, f30, _ = faces[0]
+        u0, v0 = fuv0[0]
+        m_cell = (f30(u0 + d[0] / size[0], v0 + d[1] / size[1]) - f30(u0, v0)).length * \
+            max(src.matrix_world.to_scale())
+        shrink = (p.gap / 2) / max(m_cell, 1e-9)
+        count = 0
+        for key, ((i0, i1, j0, j1), (du, dv)) in sorted(herring_layout(src, grid, model, size).items()):
+            quad = cell_quad(grid, size, i0, i1, j0, j1, shrink)
+            polys, along = [], None
+            for fuv, f3, mat in faces:
+                cl = clip_convex(fuv, quad)
+                if len(cl) < 3:
+                    continue
+                polys.append(([(f3(u, v), (u, v)) for u, v in cl], mat))
+                if along is None:
+                    uc, vc = cl[0]
+                    along = f3(uc + du, vc + dv) - f3(uc, vc)
+            if not polys:
+                continue
+            if self.make_board(src, out, polys, p, count + 1, along=along) is not None:
+                count += 1
+        return count
+
+    def split_object(self, context, src, out, axis, bands, p, dots=()):
         me = src.data
         uv = me.uv_layers.active.data
         pieces = {}                                    # klucz deski -> lista wielokatow [(P3d, uv)]
+        rects = {}                                     # klucz deski -> (A, B w poprzek, c0, c1 wzdluz) w UV
+        faces_uv = {}                                  # klucz deski -> [(wielokat UV, mapowanie UV->3D)]
         # granice desek wzdluz pasa - liczone raz dla calego obiektu (deska przez kilka scian = jedna deska)
         all_alg = [l.uv[1] if axis == 'V' else l.uv[0] for l in uv]
         glo, ghi = min(all_alg) - 1, max(all_alg) + 1
@@ -311,66 +599,140 @@ class DESKI_OT_split(bpy.types.Operator):
                         pts = [(f3(u, v), (u, v)) for u, v in cl]
                         # klucz: pas + odcinek (bez numeru kafla wzdluz - te same deski w roznych scianach)
                         key = (t, bi, round(c0, 6))
-                        pieces.setdefault(key, []).append(pts)
+                        pieces.setdefault(key, []).append((pts, face_material(src, poly)))
+                        rects[key] = (A, Bb, c0, c1)
+                        faces_uv.setdefault(key, []).append((cl, f3))
         count = 0
-        mw = src.matrix_world
+        n_nails = 0
         for key, polys in sorted(pieces.items()):
-            bm = bmesh.new()
-            uvl = bm.loops.layers.uv.new(me.uv_layers.active.name)
-            for pts in polys:
-                vs = [bm.verts.new(co) for co, _ in pts]
-                try:
-                    f = bm.faces.new(vs)
-                except ValueError:
-                    continue
-                for lp, (_, t) in zip(f.loops, pts):
-                    lp[uvl].uv = t
-            bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-5)
-            if not bm.faces:
-                bm.free(); continue
-            if len(bm.faces) > 1:
-                bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(1), verts=bm.verts[:], edges=bm.edges[:],
-                                         delimit={'UV', 'MATERIAL'})
-            # odrzuc drzazgi na brzegach plaszczyzny
-            vs = [v.co for v in bm.verts]
-            ext = sorted((max(c[k] for c in vs) - min(c[k] for c in vs)) for k in range(3))
-            if ext[1] < p.min_piece:
-                bm.free(); continue
-            for f in bm.faces:
-                if f.normal.z < 0:
-                    f.normal_flip()
-            bm.faces.ensure_lookup_table()
-            nrm = bm.faces[0].normal.copy()
-            top = bm.faces[:]
-            if p.thickness > 0:
-                r = bmesh.ops.extrude_face_region(bm, geom=top)
-                nv = [g for g in r["geom"] if isinstance(g, bmesh.types.BMVert)]
-                bmesh.ops.translate(bm, verts=nv, vec=-nrm * p.thickness)
-                bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
-                if p.chamfer > 0:
-                    # faza gornych krawedzi (jak w oryginalnych deskach)
-                    top_edges = [e for e in bm.edges if all(v.co.dot(nrm) > max(w.co.dot(nrm) for w in bm.verts) - 1e-6
-                                                            for v in e.verts) and e.is_manifold
-                                 and len(e.link_faces) == 2 and abs(e.link_faces[0].normal.dot(e.link_faces[1].normal)) < 0.5]
-                    if top_edges:
-                        bmesh.ops.bevel(bm, geom=top_edges, offset=min(p.chamfer, p.thickness * 0.45),
-                                        offset_type='OFFSET', segments=1, affect='EDGES', clamp_overlap=True)
-            bm.faces.ensure_lookup_table()
-            dm = bpy.data.meshes.new(f"{src.name}_Deska")
-            bm.to_mesh(dm); bm.free()
-            for mat in me.materials:
-                dm.materials.append(mat)
-            for poly in dm.polygons:
-                poly.use_smooth = False
-            # origin w srodku deski (Bounds Center), jak oczekuje etap 1
-            vs = [v.co for v in dm.vertices]
-            c = Vector([(min(v[k] for v in vs) + max(v[k] for v in vs)) / 2 for k in range(3)])
-            dm.transform(Matrix.Translation(-c))
+            res = self.make_board(src, out, polys, p, count + 1)
+            if res is None:
+                continue
+            ob, c = res
             count += 1
-            ob = bpy.data.objects.new(f"{src.name}_Deska_{count:03d}", dm)
-            ob.matrix_world = mw @ Matrix.Translation(c)
-            out.objects.link(ob)
-        return count
+            if dots:
+                loc = self.board_nails(key, rects[key], faces_uv[key], dots, axis, m_per_uv, alo, ahi)
+                if loc:
+                    ob["deski_gwozdzie_tex"] = [x for q in loc for x in (q - c)]   # lokalnie, na wierzchu deski
+                    n_nails += len(loc)
+        return count, n_nails
+
+    def make_board(self, src, out, polys, p, idx, along=None):
+        """deska z wielokatow wierzchu [(pts, material)]: grubosc, faza, UV bokow, origin w srodku.
+        along = kierunek deski (lokalnie, w plaszczyznie) - obiekt dostaje wtedy obrot zgodny z deska.
+        Zwraca (obiekt, srodek w ukladzie plaszczyzny) albo None."""
+        me = src.data
+        mw = src.matrix_world
+        bm = bmesh.new()
+        uvl = bm.loops.layers.uv.new(me.uv_layers.active.name)
+        mats = []                                  # materialy tej deski = te ze scian plaszczyzny
+        for pts, mat in polys:
+            vs = [bm.verts.new(co) for co, _ in pts]
+            try:
+                f = bm.faces.new(vs)
+            except ValueError:
+                continue
+            if mat not in mats:
+                mats.append(mat)
+            f.material_index = mats.index(mat)
+            for lp, (_, t) in zip(f.loops, pts):
+                lp[uvl].uv = t
+        bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-5)
+        if not bm.faces:
+            bm.free(); return None
+        if len(bm.faces) > 1:
+            bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(1), verts=bm.verts[:], edges=bm.edges[:],
+                                     delimit={'UV', 'MATERIAL'})
+        for f in bm.faces:
+            if f.normal.z < 0:
+                f.normal_flip()
+        # n-gony (deska przycieta skosnie brzegiem plaszczyzny) -> czworokaty + trojkat
+        ngons = [f for f in bm.faces if len(f.verts) > 4]
+        if ngons:
+            r = bmesh.ops.triangulate(bm, faces=ngons, ngon_method='BEAUTY')
+            bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.pi, angle_shape_threshold=math.pi,
+                                     cmp_uvs=False, cmp_materials=True)
+        bm.faces.ensure_lookup_table()
+        nrm = bm.faces[0].normal.copy()
+        # uklad deski: X wzdluz deski, Z normalna plaszczyzny (dla desek prostych - uklad plaszczyzny)
+        R = Matrix.Identity(3)
+        if along is not None:
+            X = (along - nrm * along.dot(nrm)).normalized()
+            R = Matrix((X, nrm.cross(X), nrm)).transposed()
+            bm.transform(R.inverted().to_4x4())
+            nrm = Vector((0, 0, 1))
+        # odrzuc drzazgi na brzegach plaszczyzny
+        vs = [v.co for v in bm.verts]
+        ext = sorted((max(c[k] for c in vs) - min(c[k] for c in vs)) for k in range(3))
+        if ext[1] < p.min_piece:
+            bm.free(); return None
+        top = bm.faces[:]
+        if p.thickness > 0:
+            r = bmesh.ops.extrude_face_region(bm, geom=top)
+            nv = [g for g in r["geom"] if isinstance(g, bmesh.types.BMVert)]
+            bmesh.ops.translate(bm, verts=nv, vec=-nrm * p.thickness)
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+            if p.chamfer > 0:
+                # faza gornych krawedzi (jak w oryginalnych deskach)
+                zt = max(w.co.dot(nrm) for w in bm.verts)
+                top_edges = [e for e in bm.edges if all(v.co.dot(nrm) > zt - 1e-6 for v in e.verts) and e.is_manifold
+                             and len(e.link_faces) == 2 and abs(e.link_faces[0].normal.dot(e.link_faces[1].normal)) < 0.5]
+                if top_edges:
+                    bmesh.ops.bevel(bm, geom=top_edges, offset=min(p.chamfer, p.thickness * 0.45),
+                                    offset_type='OFFSET', segments=1, affect='EDGES', clamp_overlap=True)
+            # UV bokow, czol, fazy i spodu - rozlozone z wierzchu (inaczej sa sciagniete w linie)
+            to_frame = board_uv_frame(nrm, next(iter(bm.verts)).co.copy())
+            z_max = max(to_frame(v.co, False).z for v in bm.verts)
+            tops = [f for f in bm.faces if to_frame(f.normal, True).z > 0.999
+                    and all(to_frame(v.co, False).z > z_max - 1e-6 for v in f.verts)]
+            tset = set(tops)
+            fix_side_uvs(bm, uvl, to_frame, tops, [f for f in bm.faces if f not in tset])
+        bm.faces.ensure_lookup_table()
+        dm = bpy.data.meshes.new(f"{src.name}_Deska")
+        bm.to_mesh(dm); bm.free()
+        for mat in mats:
+            dm.materials.append(mat)
+        for poly in dm.polygons:
+            poly.use_smooth = False
+        # origin w srodku deski (Bounds Center), jak oczekuje etap 1
+        vs = [v.co for v in dm.vertices]
+        c = Vector([(min(v[k] for v in vs) + max(v[k] for v in vs)) / 2 for k in range(3)])
+        dm.transform(Matrix.Translation(-c))
+        ob = bpy.data.objects.new(f"{src.name}_Deska_{idx:03d}", dm)
+        ob.matrix_world = mw @ R.to_4x4() @ Matrix.Translation(c)
+        out.objects.link(ob)
+        return ob, R @ c
+
+    @staticmethod
+    def board_nails(key, rect, fpolys, dots, axis, m_per_uv, alo, ahi):
+        """gwozdzie z tekstury na tej desce: blisko bocznych krawedzi (narozniki) i parami w poprzek"""
+        A, Bb, c0, c1 = rect
+        lo, hi = max(c0, alo), min(c1, ahi)
+        cand = []
+        for du, dv in dots:
+            ac0, al0 = (du, dv) if axis == 'V' else (dv, du)
+            for i in range(math.floor(A) - 1, math.ceil(Bb) + 1):
+                acr = ac0 + i
+                if not (A < acr < Bb):
+                    continue
+                f = (acr - A) / (Bb - A)               # polozenie w poprzek deski (0..1)
+                if not (0.04 < f < 0.42 or 0.58 < f < 0.96):
+                    continue
+                for j in range(math.floor(lo) - 1, math.ceil(hi) + 1):
+                    alg = al0 + j
+                    if lo < alg < hi:
+                        cand.append((acr, alg, f < 0.5))
+        pair_tol = 0.06 / max(m_per_uv, 1e-9)          # para gwozdzi: do 6 cm roznicy wzdluz deski
+        out = []
+        for acr, alg, left in cand:
+            if not any(l2 != left and abs(a2 - alg) < pair_tol for _, a2, l2 in cand):
+                continue                               # samotna kropka (plama, sek) - nie gwozdz
+            u, v = (acr, alg) if axis == 'V' else (alg, acr)
+            for cl, f3 in fpolys:
+                if point_in_poly((u, v), cl):
+                    out.append(f3(u, v))
+                    break
+        return out
 
 
 # ---------------------------------------------------------------- ustawienia + panel
@@ -381,6 +743,23 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
                                        description="Obraz do wykrycia szczelin. Puste = z materialu (AO/Cavity, potem Base Color)")
     output_name: bpy.props.StringProperty(name="Kolekcja wynikowa", default="",
                                           description="Puste = '<kolekcja> - deski'")
+    layout: bpy.props.EnumProperty(name="Uklad desek", default='STRAIGHT', items=(
+        ('STRAIGHT', "Proste deski", "Deski w rzedach, szczeliny wzdluz U lub V tekstury"),
+        ('HERRINGBONE', "Jodelka (skosne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
+                                            "dlugosc deski podajesz recznie")))
+    herr_length: bpy.props.IntProperty(name="Dlugosc deski (w szerokosciach)", default=0, min=0, max=30,
+                                       description="Ile szerokosci deski ma jej dlugosc. 0 = dobierz z tekstury "
+                                                   "(najlepsze dopasowanie do szczelin, 3..12) - sprawdz Podgladem")
+    herr_variant: bpy.props.EnumProperty(name="Wariant wzoru", default='AUTO', items=(
+        ('AUTO', "Auto", "Dopasuj do tekstury"), ('A', "A", ""), ('B', "B (odbity)", ""),
+        ('C', "C (obrocony)", ""), ('D', "D (obrocony, odbity)", "")),
+        description="Orientacja jodelki. Gdy Auto nie trafia - przestaw i sprawdz Podgladem")
+    herr_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
+                                           description="Dopasuj kazda szczeline osobno (zdjecie nie jest idealna siatka): "
+                                                       "pewne szczeliny koryguja polozenie, slabo widoczne sa interpolowane")
+    herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
+                                       description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
+                                                   "-1 = dopasuj do tekstury")
     sensitivity: bpy.props.FloatProperty(name="Czulosc (odchylenia)", default=4.0, min=1.0, max=20.0,
                                          description="Jak wyrazna musi byc ciemna linia, by uznac ja za szczeline. "
                                                      "Mniej = wiecej szczelin")
@@ -404,6 +783,13 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     min_piece: bpy.props.FloatProperty(name="Min. kawalek", default=0.02, min=0.0, unit='LENGTH',
                                        description="Pomijaj drzazgi wezsze niz tyle (przy brzegach plaszczyzny)")
     hide_source: bpy.props.BoolProperty(name="Ukryj plaszczyzne zrodlowa", default=True)
+    detect_nails: bpy.props.BoolProperty(name="Wykrywaj gwozdzie", default=True,
+                                         description="Lebki gwozdzi z tekstury koloru (ciemne, chlodne punkty parami przy "
+                                                     "krawedziach deski) - uzywane przy wyrywaniu i w detalach")
+    nail_texture: bpy.props.PointerProperty(name="Tekstura gwozdzi (opcj.)", type=bpy.types.Image,
+                                            description="Puste = Base Color z materialu")
+    nail_dark: bpy.props.FloatProperty(name="Gwozdzie: kontrast", default=0.08, min=0.01, max=0.5,
+                                       description="O ile lebek musi byc ciemniejszy od drewna obok. Mniej = wiecej gwozdzi")
 
 
 class DESKI_PT_prep(bpy.types.Panel):
@@ -418,17 +804,78 @@ class DESKI_PT_prep(bpy.types.Panel):
         p = context.scene.deski_przygotowanie
         col = self.layout.column()
         col.prop(p, "source"); col.prop(p, "texture"); col.prop(p, "output_name")
+        col.prop(p, "layout", expand=True)
+        herr = p.layout == 'HERRINGBONE'
         box = col.box(); box.label(text="Wykrywanie szczelin")
-        box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
-        box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
+        if herr:
+            box.prop(p, "herr_length"); box.prop(p, "herr_variant"); box.prop(p, "herr_offset")
+            box.prop(p, "herr_calibrate")
+            box.label(text="Kat i szerokosc desek - automatycznie", icon='INFO')
+            box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
+        else:
+            box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
+            box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
+            box = col.box(); box.prop(p, "detect_nails")
+            sub = box.column(); sub.enabled = p.detect_nails
+            sub.prop(p, "nail_texture"); sub.prop(p, "nail_dark")
         box = col.box(); box.label(text="Deski")
-        box.prop(p, "max_length"); box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
+        if not herr:
+            box.prop(p, "max_length")
+        box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
         col.prop(p, "hide_source")
         col.separator()
         col.operator(DESKI_OT_split.bl_idname, icon='MOD_EDGESPLIT')
 
 
-classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_PT_prep)
+class DESKI_OT_split_preview(bpy.types.Operator):
+    bl_idname = "object.deski_podglad"
+    bl_label = "Podglad podzialu"
+    bl_description = ("Rysuje obrysy desek (wykryta jodelka) na plaszczyznach - do sprawdzenia dopasowania "
+                      "do tekstury przed cieciem. Obiekt 'Podglad podzialu' mozna potem usunac")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.deski_przygotowanie.source is not None
+
+    def execute(self, context):
+        p = context.scene.deski_przygotowanie
+        old = bpy.data.objects.get("Podglad podzialu")
+        if old:
+            bpy.data.objects.remove(old)
+        bm = bmesh.new()
+        cache, info = {}, []
+        for src in [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]:
+            img = find_texture(src, p.texture)
+            if img is None or img.size[0] == 0:
+                info.append(f"{src.name}: brak tekstury"); continue
+            grid, model, size = herring_fit_cached(cache, img, p)
+            info.append(f"{src.name}: dlugosc deski {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]}, "
+                        f"zgodnosc {model[0]:.4f}")
+            me = src.data; uv = me.uv_layers.active.data; mw = src.matrix_world
+            for (i0, i1, j0, j1), _ in herring_layout(src, grid, model, size).values():
+                quad = cell_quad(grid, size, i0, i1, j0, j1, 0.0)
+                for poly in me.polygons:
+                    aff = face_uv_affine(me, poly, uv)
+                    if not aff:
+                        continue
+                    cl = clip_convex([tuple(uv[l].uv) for l in poly.loop_indices], quad)
+                    if len(cl) < 3:
+                        continue
+                    nrm = (mw.to_3x3() @ poly.normal).normalized()
+                    vs = [bm.verts.new(mw @ aff[0](u, v) + nrm * 0.002) for u, v in cl]
+                    for k in range(len(vs)):
+                        bm.edges.new((vs[k], vs[k - 1]))
+        me = bpy.data.meshes.new("Podglad podzialu")
+        bm.to_mesh(me); bm.free()
+        ob = bpy.data.objects.new("Podglad podzialu", me)
+        ob.show_in_front = True; ob.hide_render = True
+        context.scene.collection.objects.link(ob)
+        self.report({'INFO'}, "; ".join(info) or "Brak plaszczyzn")
+        return {'FINISHED'}
+
+
+classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_PT_prep)
 
 
 def register():

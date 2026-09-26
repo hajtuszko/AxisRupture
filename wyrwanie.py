@@ -106,6 +106,23 @@ class Board:
         self.sk = [-self.L / 2 + k * self.ds for k in range(self.N + 1)]
         self.kA = max(1, int(round(nail_frac * self.N)))
         self.kB = self.N - self.kA
+        # gwozdzie wykryte na teksturze (Przygotowanie desek): (wezel k, polozenie w poprzek w)
+        self.tex_nails = []
+        d = self.o.get("deski_gwozdzie_tex")
+        if d:
+            mw = self.o.matrix_world
+            for i in range(0, len(d), 3):
+                q = self.Finv @ (mw @ Vector(d[i:i + 3]))
+                k = min(self.N - 1, max(1, int(round((q.x + self.L / 2) / self.ds))))
+                self.tex_nails.append((k, max(-self.W / 2, min(self.W / 2, q.y))))
+            ks = sorted(k for k, w in self.tex_nails)
+            # deska trzyma sie na skrajnych gwozdziach (najblizej koncow)
+            if ks and ks[0] < self.N / 2:
+                self.kA = ks[0]
+            if ks and ks[-1] > self.N / 2:
+                self.kB = ks[-1]
+            if self.kB - self.kA < 2:
+                self.kA = max(1, int(round(nail_frac * self.N))); self.kB = self.N - self.kA
         ns = max(21, int(math.ceil(self.L / 0.02)) + 1)
         self.sg = [-self.L / 2 + self.L * j / (ns - 1) for j in range(ns)]
         self.wg = [-self.W / 2, -self.W / 4, 0.0, self.W / 4, self.W / 2]
@@ -403,6 +420,7 @@ class DESKI_OT_deform(bpy.types.Operator):
         b.roll = roll
         b.nodes = canon(nodes, ds)
         b.phase = phase
+        b.side = side
         b.H = H
         return True
 
@@ -484,6 +502,12 @@ class DESKI_OT_deform(bpy.types.Operator):
             bmesh.ops.bevel(bm, geom=edges, offset=off, offset_type='OFFSET', segments=segments,
                             profile=0.5, affect='EDGES', clamp_overlap=False, loop_slide=True,
                             miter_outer='SHARP', miter_inner='SHARP')
+        # bevel na krotkiej/skosnej desce potrafi zostawic 5-kat -> czworokat + trojkat
+        ngons = [f for f in bm.faces if len(f.verts) > 4]
+        if ngons:
+            r = bmesh.ops.triangulate(bm, faces=ngons, ngon_method='BEAUTY')
+            bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.radians(10),
+                                     angle_shape_threshold=math.pi, cmp_uvs=True, cmp_materials=True)
         if smooth:
             # gladkie cieniowanie zgiecia; krawedzie deski (> 30 st.) zostaja ostre
             for e in bm.edges:
@@ -615,8 +639,28 @@ class DESKI_OT_deform(bpy.types.Operator):
             vl.objects.active = prev
         stats = {"prosta": 0, "wygieta": 0}
         for b in moved:
+            # gwozdzie (dla modulu Detale): gora i spod deski w miejscu gwozdzia + czy puscil
+            if b.tex_nails:
+                # prawdziwe gwozdzie z tekstury; puszczaja wszystkie poza trzymajacym koncem
+                def rel(k):
+                    if b.phase == 3:
+                        return True
+                    if b.phase == 2:
+                        return k > b.kA if b.side == 1 else k < b.kB
+                    return False
+                src = [(k, w, rel(k)) for k, w in b.tex_nails]
+            else:
+                released = {1: set(), 2: {b.kB if b.side == 1 else b.kA}, 3: {b.kA, b.kB}}[b.phase]
+                src = [(k, 0.0, k in released) for k in (b.kA, b.kB)]
+            nails = [(b.node_point(k, w, b.T), b.node_point(k, w, 0.0), r) for k, w, r in src]
             stats[self.apply(b, p.smooth_shading, p.bevel_segments)] += 1
+            inv = b.o.matrix_world.inverted()
+            data = []
+            for top, bot, rel in nails:
+                data += list(inv @ top) + list(inv @ bot) + [1.0 if rel else 0.0]
             b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
+            b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
+            b.o["deski_podloga"] = b.z0                 # poziom podlogi (swiat)
         msg = (f"Deski: {len(moved)} ruszone (proste: {stats['prosta']}, wygiete: {stats['wygieta']}), "
                f"nietkniete: {len(boards) - len(moved)}")
         if skipped:
