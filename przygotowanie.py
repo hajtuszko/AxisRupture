@@ -411,6 +411,78 @@ def cell_quad(grid, size, i0, i1, j0, j1, shrink):
     return jd.cell_quad(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
 
 
+def calibrate_straight(S, axis, seams, bands):
+    """kalibracja lokalna prostych desek: kazda dluga szczelina (w odcinkach ~ szerokosc deski) i kazde
+    laczenie (koniec deski) mierzone osobno; z pewnych pomiarow gladkie pole korekty (jak w jodelce)"""
+    import numpy as np
+    h, w = S.shape
+    n_acr, n_alg = (w, h) if axis == 'V' else (h, w)
+    Wpx = max(8.0, float(np.median([b - a for a, b, _ in bands])) * n_acr)
+
+    def P(acr, alg):                                   # (w poprzek, wzdluz) w UV -> piksele (x, y)
+        return (acr * w, alg * h) if axis == 'V' else (alg * w, acr * h)
+    s0, s1 = [], []
+    nseg = max(1, int(round(n_alg / Wpx)))
+    for a in seams:
+        for k in range(nseg):
+            s0.append(P(a, k / nseg)); s1.append(P(a, (k + 1) / nseg))
+    for a, b, joints in bands:
+        for j in joints:
+            s0.append(P(a, j)); s1.append(P(b, j))
+    P0 = np.array(s0, float).T; P1 = np.array(s1, float).T
+    reach = 0.3 * Wpx
+    d, conf, nrm, mid = jd.measure_edges(S, P0, P1, reach)
+    G = int(min(48, max(4, round(min(w, h) / (2 * Wpx)))))
+    field = jd.fit_field(mid, nrm, d, conf, (w, h), G, 0.2)
+    Q0 = P0 + jd.field_at(field, P0[0], P0[1]); Q1 = P1 + jd.field_at(field, P1[0], P1[1])
+    d2, _, _, _ = jd.measure_edges(S, Q0, Q1, reach)
+    good = conf >= 3.0
+    if good.any():
+        field["stats"] = {"odcinki": int(len(d)), "pewne": int(good.sum()),
+                          "przed_med": round(float(np.median(np.abs(d[good]))), 2),
+                          "po_med": round(float(np.median(np.abs(d2[good]))), 2),
+                          "przed_p90": round(float(np.percentile(np.abs(d[good]), 90)), 2),
+                          "po_p90": round(float(np.percentile(np.abs(d2[good]), 90)), 2)}
+    return field
+
+
+def straight_detect_cached(cache, img, p):
+    """uklad prostych desek (os, szczeliny, pasy z laczeniami) + pole korekty i rozmiar mapy (lub None)"""
+    key = ("s", img.name, p.straight_method, p.straight_calibrate, p.sensitivity, p.min_width, p.min_length,
+           p.joint_cover, p.joint_contrast)
+    if key in cache:
+        return cache[key]
+    field, size = None, None
+    if p.straight_method == 'MAPS':
+        res = 2048 if max(img.size) >= 2048 else 1024
+        if ("S", img.name) not in cache:
+            S, used = jd.seam_map(img, res)
+            print("Przygotowanie desek - proste: mapy szczelin", used, "rozdzielczosc", res)
+            cache[("S", img.name)] = (S, None, None)
+        S = cache[("S", img.name)][0]
+        # mapa szczelin: szczelina = jasny grzbiet -> dla wykrywania (ciemne linie) odwrocona
+        axis, seams, bands = detect_planks(-S.astype(float), p.sensitivity, p.min_width, p.min_length,
+                                           p.joint_cover, p.joint_contrast)
+        size = (S.shape[1], S.shape[0])
+        if p.straight_calibrate and len(seams) >= 2:
+            field = calibrate_straight(S, axis, seams, bands)
+            print("Przygotowanie desek - proste: kalibracja lokalna (px)", field.get("stats"))
+    else:
+        axis, seams, bands = detect_planks(image_luminance(img), p.sensitivity, p.min_width,
+                                           p.min_length, p.joint_cover, p.joint_contrast)
+    cache[key] = (axis, seams, bands, field, size)
+    return cache[key]
+
+
+def warp_rect(field, size, r):
+    """prostokat UV (u0, u1, v0, v1) -> czworokat CCW z naroznikami przesunietymi polem korekty"""
+    import numpy as np
+    u0, u1, v0, v1 = r
+    cs = np.array([(u0, v0), (u1, v0), (u1, v1), (u0, v1)], float)
+    Dp = jd.field_at(field, cs[:, 0] * size[0], cs[:, 1] * size[1])
+    return [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(4)]
+
+
 # ---------------------------------------------------------------- operator
 class DESKI_OT_split(bpy.types.Operator):
     bl_idname = "object.deski_przygotuj"
@@ -448,10 +520,7 @@ class DESKI_OT_split(bpy.types.Operator):
                 if p.hide_source:
                     src.hide_set(True); src.hide_render = True
                 continue
-            if img.name not in cache:
-                cache[img.name] = detect_planks(image_luminance(img), p.sensitivity, p.min_width,
-                                                p.min_length, p.joint_cover, p.joint_contrast)
-            axis, seams, bands = cache[img.name]
+            axis, seams, bands, field, fsize = straight_detect_cached(cache, img, p)
             if len(seams) < 2:
                 msgs.append(f"{src.name}: nie wykryto szczelin na {img.name}"); continue
             dots, cimg = [], None
@@ -461,7 +530,8 @@ class DESKI_OT_split(bpy.types.Operator):
                     if ("n", cimg.name) not in cache:
                         cache[("n", cimg.name)] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
                     dots = cache[("n", cimg.name)]
-            n, nn = self.split_object(context, src, out, axis, bands, p, dots)
+            n, nn = self.split_object(context, src, out, axis, bands, p, dots,
+                                      warp=(lambda r, f=field, z=fsize: warp_rect(f, z, r)) if field else None)
             total += n
             msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
                         + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
@@ -512,7 +582,7 @@ class DESKI_OT_split(bpy.types.Operator):
                 count += 1
         return count
 
-    def split_object(self, context, src, out, axis, bands, p, dots=()):
+    def split_object(self, context, src, out, axis, bands, p, dots=(), warp=None):
         me = src.data
         uv = me.uv_layers.active.data
         pieces = {}                                    # klucz deski -> lista wielokatow [(P3d, uv)]
@@ -593,7 +663,7 @@ class DESKI_OT_split(bpy.types.Operator):
                             r = (c0 + g_alg, c1 - g_alg, A + g_acr, Bb - g_acr)
                         if r[0] >= r[1] or r[2] >= r[3]:
                             continue
-                        cl = clip_rect(fuv, *r)
+                        cl = clip_convex(fuv, warp(r)) if warp else clip_rect(fuv, *r)
                         if len(cl) < 3:
                             continue
                         pts = [(f3(u, v), (u, v)) for u, v in cl]
@@ -760,6 +830,13 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
                                        description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
                                                    "-1 = dopasuj do tekstury")
+    straight_method: bpy.props.EnumProperty(name="Wykrywanie", default='MAPS', items=(
+        ('MAPS', "Wszystkie mapy", "Szczeliny ze wszystkich map materialu (AO, Cavity, Roughness, Normal, wysokosc...) - "
+                                   "odporne na sloje i plamy"),
+        ('LUMA', "Jasnosc jednej mapy", "Poprzednia metoda: ciemne linie na jednej teksturze (AO / Base Color)")))
+    straight_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
+                                               description="Dopasuj kazda szczeline i kazde laczenie osobno (zdjecie nie "
+                                                           "jest idealna siatka). Tylko z metoda 'Wszystkie mapy'")
     sensitivity: bpy.props.FloatProperty(name="Czulosc (odchylenia)", default=4.0, min=1.0, max=20.0,
                                          description="Jak wyrazna musi byc ciemna linia, by uznac ja za szczeline. "
                                                      "Mniej = wiecej szczelin")
@@ -813,6 +890,8 @@ class DESKI_PT_prep(bpy.types.Panel):
             box.label(text="Kat i szerokosc desek - automatycznie", icon='INFO')
             box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
         else:
+            box.prop(p, "straight_method")
+            sub = box.row(); sub.enabled = p.straight_method == 'MAPS'; sub.prop(p, "straight_calibrate")
             box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
             box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
             box = col.box(); box.prop(p, "detect_nails")
