@@ -146,11 +146,24 @@ def detect_nail_dots(img, cool_thr=-0.06, dark_thr=0.08):
     return [((x + 0.5) / w, (y + 0.5) / h) for y, x in pts]
 
 
+def face_material(obj, poly):
+    """material faktycznie widoczny na scianie: slot z indeksu sciany (link Object albo Data)"""
+    slots = obj.material_slots
+    return slots[poly.material_index].material if poly.material_index < len(slots) else None
+
+
+def used_materials(obj):
+    """materialy uzyte na scianach obiektu, od najczesciej uzywanego"""
+    from collections import Counter
+    cnt = Counter(face_material(obj, p) for p in obj.data.polygons)
+    return [m for m, _ in cnt.most_common() if m is not None]
+
+
 def _images(obj):
+    """obrazy z materialow rzeczywiscie uzytych na plaszczyznie (nie ze wszystkich slotow)"""
     imgs = []
-    for slot in obj.material_slots:
-        m = slot.material
-        if m and m.node_tree:
+    for m in used_materials(obj):
+        if m.node_tree:
             imgs += [n.image for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image]
     return imgs
 
@@ -464,7 +477,7 @@ class DESKI_OT_split(bpy.types.Operator):
                         pts = [(f3(u, v), (u, v)) for u, v in cl]
                         # klucz: pas + odcinek (bez numeru kafla wzdluz - te same deski w roznych scianach)
                         key = (t, bi, round(c0, 6))
-                        pieces.setdefault(key, []).append(pts)
+                        pieces.setdefault(key, []).append((pts, face_material(src, poly)))
                         rects[key] = (A, Bb, c0, c1)
                         faces_uv.setdefault(key, []).append((cl, f3))
         count = 0
@@ -473,12 +486,16 @@ class DESKI_OT_split(bpy.types.Operator):
         for key, polys in sorted(pieces.items()):
             bm = bmesh.new()
             uvl = bm.loops.layers.uv.new(me.uv_layers.active.name)
-            for pts in polys:
+            mats = []                                  # materialy tej deski = te ze scian plaszczyzny
+            for pts, mat in polys:
                 vs = [bm.verts.new(co) for co, _ in pts]
                 try:
                     f = bm.faces.new(vs)
                 except ValueError:
                     continue
+                if mat not in mats:
+                    mats.append(mat)
+                f.material_index = mats.index(mat)
                 for lp, (_, t) in zip(f.loops, pts):
                     lp[uvl].uv = t
             bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-5)
@@ -520,7 +537,7 @@ class DESKI_OT_split(bpy.types.Operator):
             bm.faces.ensure_lookup_table()
             dm = bpy.data.meshes.new(f"{src.name}_Deska")
             bm.to_mesh(dm); bm.free()
-            for mat in me.materials:
+            for mat in mats:
                 dm.materials.append(mat)
             for poly in dm.polygons:
                 poly.use_smooth = False
