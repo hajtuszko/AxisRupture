@@ -238,6 +238,44 @@ class DESKI_OT_split(bpy.types.Operator):
             cuts = sorted(j + m for j in joints for m in range(math.floor(glo) - 1, math.ceil(ghi) + 2)
                           if glo < j + m < ghi)
             band_edges.append([glo] + cuts + [ghi])
+
+        # dodatkowy podzial zbyt dlugich desek w proporcji 40/60 (naprzemiennie 60/40 w sasiednich pasach)
+        alo, ahi = min(all_alg), max(all_alg)          # rzeczywisty zasieg plaszczyzny wzdluz desek
+        mw = src.matrix_world
+        m_per_uv = 0.0
+        for poly in me.polygons:
+            aff = face_uv_affine(me, poly, uv)
+            if aff:
+                u0, v0 = uv[poly.loop_indices[0]].uv
+                q0, q1 = aff[0](u0, v0), (aff[0](u0, v0 + 1) if axis == 'V' else aff[0](u0 + 1, v0))
+                m_per_uv = (mw @ q1 - mw @ q0).length   # metry na jednostke UV wzdluz desek
+                break
+        edge_cache = {}
+
+        def edges_for(t, bi):
+            if (t, bi) in edge_cache:
+                return edge_cache[(t, bi)]
+            base = band_edges[bi]
+            if p.max_length <= 0 or m_per_uv <= 0:
+                edge_cache[(t, bi)] = base
+                return base
+            res = [base[0]]
+            flip = (t * len(bands) + bi) % 2 == 1
+            for c0, c1 in zip(base, base[1:]):
+                lo_, hi_ = max(c0, alo), min(c1, ahi)   # deska przycieta do plaszczyzny
+                inner = []
+
+                def split(x0, x1, fl):
+                    if (x1 - x0) * m_per_uv <= p.max_length:
+                        return
+                    c = x0 + (x1 - x0) * (0.6 if fl else 0.4)
+                    split(x0, c, not fl); inner.append(c); split(c, x1, not fl)
+                if hi_ > lo_:
+                    split(lo_, hi_, flip)
+                res += sorted(inner) + [c1]
+            edge_cache[(t, bi)] = res
+            return res
+
         for poly in me.polygons:
             aff = face_uv_affine(me, poly, uv)
             if aff is None:
@@ -257,7 +295,7 @@ class DESKI_OT_split(bpy.types.Operator):
                     if Bb < min(acr) or A > max(acr):
                         continue
                     lo, hi = min(alg), max(alg)
-                    edges = band_edges[bi]
+                    edges = edges_for(t, bi)
                     for c0, c1 in zip(edges, edges[1:]):
                         if c1 < lo or c0 > hi:
                             continue
@@ -355,6 +393,9 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
                                                         "poprzeczna linia konca deski. Mniej = wiecej laczen")
     joint_cover: bpy.props.FloatProperty(name="Laczenia: pokrycie", default=0.6, min=0.1, max=1.0, subtype='FACTOR',
                                          description="Jaka czesc szerokosci deski musi przecinac linia konca deski")
+    max_length: bpy.props.FloatProperty(name="Maks. dlugosc deski", default=2.5, min=0.0, unit='LENGTH',
+                                        description="Deski dluzsze niz tyle sa dzielone w proporcji 40/60 "
+                                                    "(naprzemiennie w sasiednich pasach). 0 = bez podzialu")
     thickness: bpy.props.FloatProperty(name="Grubosc", default=0.012, min=0.0, unit='LENGTH',
                                        description="Deska wyciagana w dol od plaszczyzny (gora zostaje na miejscu)")
     gap: bpy.props.FloatProperty(name="Szczelina", default=0.001, min=0.0, unit='LENGTH',
@@ -381,7 +422,7 @@ class DESKI_PT_prep(bpy.types.Panel):
         box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
         box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
         box = col.box(); box.label(text="Deski")
-        box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
+        box.prop(p, "max_length"); box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
         col.prop(p, "hide_source")
         col.separator()
         col.operator(DESKI_OT_split.bl_idname, icon='MOD_EDGESPLIT')
