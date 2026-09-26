@@ -403,6 +403,7 @@ class DESKI_OT_deform(bpy.types.Operator):
         b.roll = roll
         b.nodes = canon(nodes, ds)
         b.phase = phase
+        b.side = side
         b.H = H
         return True
 
@@ -615,8 +616,17 @@ class DESKI_OT_deform(bpy.types.Operator):
             vl.objects.active = prev
         stats = {"prosta": 0, "wygieta": 0}
         for b in moved:
+            # gwozdzie (dla modulu Detale): gora i spod deski w miejscu gwozdzia + czy puscil
+            released = {1: set(), 2: {b.kB if b.side == 1 else b.kA}, 3: {b.kA, b.kB}}[b.phase]
+            nails = [(b.node_point(k, 0.0, b.T), b.node_point(k, 0.0, 0.0), k in released) for k in (b.kA, b.kB)]
             stats[self.apply(b, p.smooth_shading, p.bevel_segments)] += 1
+            inv = b.o.matrix_world.inverted()
+            data = []
+            for top, bot, rel in nails:
+                data += list(inv @ top) + list(inv @ bot) + [1.0 if rel else 0.0]
             b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
+            b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
+            b.o["deski_podloga"] = b.z0                 # poziom podlogi (swiat)
         msg = (f"Deski: {len(moved)} ruszone (proste: {stats['prosta']}, wygiete: {stats['wygieta']}), "
                f"nietkniete: {len(boards) - len(moved)}")
         if skipped:
