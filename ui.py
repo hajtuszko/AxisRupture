@@ -402,9 +402,45 @@ class DESKI_PT_fx_ice(Panel):
         col.prop(e, "ice_seed", text="Seed")
 
 
+class DESKI_PT_fx_carpet(Panel):
+    bl_label = "Odklejanie wykładziny"
+    bl_parent_id = "DESKI_PT_fx"
+    bl_space_type, bl_region_type, bl_category = SPACE.values()
+
+    def draw_header(self, context):
+        self.layout.label(icon='MOD_CURVE')
+
+    def draw(self, context):
+        from . import efekty
+        e = context.scene.deski_efekty
+        L = self.layout
+        col = split(L.column())
+        col.prop(e, "carpet_source", text="Wykładzina")
+        col.prop(e, "carpet_handle", text="Odklejanie od (Empty)")
+        L.row().prop(e, "carpet_mode", expand=True)
+        big(L, efekty.DESKI_OT_carpet.bl_idname, "Odklej", 'MOD_CURVE',
+            enabled=e.carpet_source is not None and e.carpet_handle is not None)
+        col = split(L.column())
+        if e.carpet_mode == 'PECHERZ':
+            col.prop(e, "carpet_bubble", text="Promień")
+            col.prop(e, "carpet_bubble_h", text="Wysokość")
+        else:
+            col.prop(e, "carpet_length", text="Długość odklejenia")
+            col.prop(e, "carpet_radius", text="Promień zgięcia" if e.carpet_mode == 'ZAGIECIE' else "Promień zwoju")
+            if e.carpet_mode == 'ZAGIECIE':
+                col.prop(e, "carpet_angle", text="Kąt płata (°)")
+                col.prop(e, "carpet_curl", text="Podwinięcie końca")
+            col.prop(e, "carpet_noise", text="Nierówność linii")
+            col.prop(e, "carpet_wrinkle", text="Fałdy")
+        col.separator()
+        col.prop(e, "carpet_thickness", text="Grubość")
+        col.prop(e, "carpet_seg", text="Gęstość pętli")
+        col.prop(e, "carpet_seed", text="Seed")
+
+
 classes = (DESKI_PT_prep, DESKI_PT_prep_detect, DESKI_PT_prep_nails, DESKI_PT_prep_boards,
            DESKI_PT_panel, DESKI_PT_scen, DESKI_PT_nails, DESKI_PT_quality, DESKI_PT_options, DESKI_PT_anim,
-           DESKI_PT_details, *FEATURES, DESKI_PT_fx, DESKI_PT_fx_ice)
+           DESKI_PT_details, *FEATURES, DESKI_PT_fx, DESKI_PT_fx_ice, DESKI_PT_fx_carpet)
 
 
 def register():

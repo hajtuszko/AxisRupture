@@ -232,6 +232,155 @@ class DESKI_OT_ice(bpy.types.Operator):
         return ob
 
 
+# ================================================================ odklejanie wykladziny
+def _sm(t):
+    t = max(0.0, min(1.0, t)); return t * t * (3 - 2 * t)
+
+
+def peel_table(mode, L, R, angle, curl, thick, step=0.001):
+    """profil odklejonej czesci wg dlugosci luku s (od linii odklejenia): [(s, x, z)] - x wstecz, z w gore.
+    Krzywizna: zagiecie - luk o promieniu R do kata, dalej prosto (+ podwiniecie konca); zwoj - spirala,
+    ktorej promien maleje o >= 1.5 x grubosc na obrot (bez przenikania)"""
+    out = [(0.0, 0.0, 0.0)]
+    x = z = th = 0.0
+    n = max(2, int(L / step) + 1)
+    ds = L / (n - 1)
+    k_sp = 1.5 * thick / (2 * math.pi)
+    for i in range(1, n):
+        s = i * ds
+        if mode == 'ZWOJ':
+            r = max(R - k_sp * th, 2 * thick)
+            kap = 1.0 / r
+        else:
+            kap = (1.0 / R) if th < angle else 0.0
+            if curl > 0 and s > 0.6 * L:                      # podwiniecie wolnego konca
+                kap += curl * _sm((s - 0.6 * L) / (0.4 * L)) / max(R, 1e-4)
+        th += kap * ds
+        x += math.cos(th) * ds; z += math.sin(th) * ds
+        out.append((s, x, z))
+    return out
+
+
+def _table_at(tab, s):
+    if s <= 0:
+        return 0.0, 0.0
+    ds = tab[1][0] - tab[0][0]
+    i = min(len(tab) - 2, int(s / ds))
+    f = (s - tab[i][0]) / ds
+    return (tab[i][1] + (tab[i + 1][1] - tab[i][1]) * f, tab[i][2] + (tab[i + 1][2] - tab[i][2]) * f)
+
+
+class DESKI_OT_carpet(bpy.types.Operator):
+    bl_idname = "object.deski_wykladzina"
+    bl_label = "Odklej wykładzinę"
+    bl_description = ("Odkleja wykladzine / linoleum / tapete od strony Empty: zwoj, zagiecie albo pecherz. "
+                      "Wynik: kopia '<nazwa>_odklejona' z modyfikatorem grubosci (Solidify)")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        e = context.scene.deski_efekty
+        return e.carpet_source is not None and e.carpet_handle is not None
+
+    def execute(self, context):
+        from mathutils import noise
+        from .przygotowanie import src_normal
+        e = context.scene.deski_efekty
+        src, hd = e.carpet_source, e.carpet_handle
+        name = src.name + "_odklejona"
+        me = src.data.copy(); me.name = name
+        ob = bpy.data.objects.get(name)
+        if ob is None:
+            ob = bpy.data.objects.new(name, me)
+            for c in src.users_collection:
+                c.objects.link(ob)
+        else:
+            old = ob.data; ob.data = me
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        ob.matrix_world = src.matrix_world.copy()
+        # uklad plaszczyzny (lokalnie): n - normalna, d - kierunek odklejania (od Empty do srodka), e - w poprzek
+        n = src_normal(src)
+        vs = [v.co for v in me.vertices]
+        ctr = sum(vs, Vector()) / len(vs)
+        hloc = src.matrix_world.inverted() @ hd.matrix_world.translation
+        d = ctr - hloc; d -= n * d.dot(n)
+        if d.length < 1e-6:
+            d = n.orthogonal()
+        d.normalize()
+        ex = n.cross(d).normalized()
+        u0 = min(v.dot(d) for v in vs)
+        h0 = sum(v.dot(n) for v in vs) / len(vs)
+        mode = e.carpet_mode
+        L = e.carpet_length
+        seg = max(e.carpet_seg, 0.002)
+        bm = bmesh.new(); bm.from_mesh(me)
+        wmin = min(v.co.dot(ex) for v in bm.verts); wmax = max(v.co.dot(ex) for v in bm.verts)
+        if mode == 'PECHERZ':
+            hc = Vector((hloc.dot(d), hloc.dot(ex)))
+            Rb = e.carpet_bubble
+            cuts_d = [hc.x - Rb + 2 * Rb * i / 24 for i in range(25)]
+            cuts_e = [hc.y - Rb + 2 * Rb * i / 24 for i in range(25)]
+            box = (hc.x - Rb - seg, hc.x + Rb + seg, hc.y - Rb - seg, hc.y + Rb + seg)
+        else:
+            reach = L * (1 + 0.3) + 4 * e.carpet_radius
+            cuts_d = []
+            u = u0 + seg
+            while u < u0 + reach:
+                cuts_d.append(u); u += seg
+            ncol = max(4, int((wmax - wmin) / max(3 * seg, (wmax - wmin) / 40)))
+            cuts_e = [wmin + (wmax - wmin) * i / ncol for i in range(1, ncol)]
+            box = (-1e9, u0 + reach + seg, -1e9, 1e9)
+
+        def in_zone(f):
+            """sciana naklada sie na strefe efektu (obszarem, nie tylko wierzcholkami)"""
+            ud = [v.co.dot(d) for v in f.verts]; ue = [v.co.dot(ex) for v in f.verts]
+            return min(ud) <= box[1] and max(ud) >= box[0] and min(ue) <= box[3] and max(ue) >= box[2]
+        # petle tylko w strefie efektu (przekroje w obu kierunkach -> linia odklejenia moze byc nieregularna)
+        for axis, cuts in ((d, cuts_d), (ex, cuts_e)):
+            for c in cuts:
+                geom = [f for f in bm.faces if in_zone(f)]
+                if not geom:
+                    continue
+                gv = {v for f in geom for v in f.verts}
+                ge = {ed for f in geom for ed in f.edges}
+                bmesh.ops.bisect_plane(bm, geom=list(gv) + list(ge) + geom, plane_co=axis * c, plane_no=axis)
+        from .detale import no_ngons
+        no_ngons(bm)
+        # deformacja (dlugosc luku zachowana - tekstura sie nie rozciaga)
+        tab = None
+        if mode != 'PECHERZ':
+            tab = peel_table(mode, L * 1.3 + 0.05, e.carpet_radius, math.radians(e.carpet_angle), e.carpet_curl,
+                             e.carpet_thickness)
+        for v in bm.verts:
+            p = v.co
+            u = p.dot(d) - u0; w = p.dot(ex); hh = p.dot(n) - h0
+            if mode == 'PECHERZ':
+                r = math.hypot(p.dot(d) - hc.x, w - hc.y) / max(e.carpet_bubble, 1e-6)
+                if r < 1:
+                    v.co = p + n * (e.carpet_bubble_h * (1 - r * r) ** 2
+                                    * (1 + 0.15 * noise.noise(Vector((w * 6, p.dot(d) * 6, 0.3)))))
+                continue
+            Lf = L * (1 + e.carpet_noise * noise.noise(Vector((w * 3.0, 0.5, e.carpet_seed * 1.7))))
+            if u >= Lf:
+                continue
+            s = Lf - u
+            x, z = _table_at(tab, s)
+            z += e.carpet_wrinkle * math.sin(w * 2 * math.pi / 0.25) * min(1.0, s / max(L, 1e-6))
+            base = d * (u0 + Lf) + ex * w + n * (h0 + hh)
+            v.co = base - d * x + n * z
+        bm.normal_update()
+        bm.to_mesh(me); bm.free(); me.update()
+        # grubosc: Solidify (nie niszczy - do nalozenia przy eksporcie)
+        mod = ob.modifiers.get("Deski_grubosc") or ob.modifiers.new("Deski_grubosc", 'SOLIDIFY')
+        mod.thickness = e.carpet_thickness; mod.offset = 1.0; mod.use_even_offset = True
+        mod.use_quality_normals = True
+        src.hide_set(True); src.hide_render = True
+        ob["deski_efekt"] = "wykladzina"
+        self.report({'INFO'}, f"Odklejono '{src.name}' ({mode.lower()}): {len(me.polygons)} scian (bez grubosci)")
+        return {'FINISHED'}
+
+
 # ================================================================ ustawienia
 class DeskiEffectsSettings(bpy.types.PropertyGroup):
     ice_source: bpy.props.PointerProperty(name="Płyta lodu", type=bpy.types.Object,
@@ -254,9 +403,33 @@ class DeskiEffectsSettings(bpy.types.PropertyGroup):
     ice_water: bpy.props.BoolProperty(name="Dodaj wodę", default=True,
                                       description="Plaszczyzna wody pod lodem (bez materialu - przypisz swoj)")
     ice_seed: bpy.props.IntProperty(name="Seed", default=7)
+    carpet_source: bpy.props.PointerProperty(name="Wykładzina", type=bpy.types.Object,
+                                             poll=lambda s, o: o.type == 'MESH' and len(o.data.uv_layers) > 0,
+                                             description="Plaszczyzna wykladziny / linoleum / tapety (z UV)")
+    carpet_handle: bpy.props.PointerProperty(name="Odklejanie od", type=bpy.types.Object,
+                                             description="Empty przy krawedzi / w rogu: stad wykladzina sie odkleja "
+                                                         "(kierunek - do srodka plaszczyzny); dla pecherza - jego srodek")
+    carpet_mode: bpy.props.EnumProperty(name="Rodzaj", default='ZAGIECIE', items=(
+        ('ZAGIECIE', "Zagięcie", "Odchylony plat z lukiem przy linii odklejenia", 'MOD_CURVE', 0),
+        ('ZWOJ', "Zwój", "Zrolowana wykladzina (spirala)", 'MOD_SCREW', 1),
+        ('PECHERZ', "Pęcherz", "Wybrzuszenie w srodku (bez odklejonej krawedzi)", 'SPHERE', 2)))
+    carpet_length: bpy.props.FloatProperty(name="Długość odklejenia", default=0.45, min=0.01, unit='LENGTH',
+                                           description="Jak daleko od krawedzi wykladzina jest odklejona")
+    carpet_radius: bpy.props.FloatProperty(name="Promień zgięcia / zwoju", default=0.05, min=0.002, unit='LENGTH')
+    carpet_angle: bpy.props.FloatProperty(name="Kąt płata (°)", default=70.0, min=0.0, max=170.0)
+    carpet_curl: bpy.props.FloatProperty(name="Podwinięcie końca", default=0.3, min=0.0, max=3.0,
+                                         description="Dodatkowe zawiniecie wolnego konca plata")
+    carpet_noise: bpy.props.FloatProperty(name="Nierówność linii", default=0.12, min=0.0, max=0.6, subtype='FACTOR')
+    carpet_wrinkle: bpy.props.FloatProperty(name="Fałdy", default=0.004, min=0.0, unit='LENGTH')
+    carpet_bubble: bpy.props.FloatProperty(name="Promień pęcherza", default=0.35, min=0.02, unit='LENGTH')
+    carpet_bubble_h: bpy.props.FloatProperty(name="Wysokość pęcherza", default=0.04, min=0.0, unit='LENGTH')
+    carpet_thickness: bpy.props.FloatProperty(name="Grubość", default=0.006, min=0.0005, unit='LENGTH')
+    carpet_seg: bpy.props.FloatProperty(name="Gęstość pętli", default=0.012, min=0.002, unit='LENGTH',
+                                        description="Odstep petli w strefie odklejenia (mniej = gladszy luk, wiecej scian)")
+    carpet_seed: bpy.props.IntProperty(name="Seed", default=3)
 
 
-classes = (DeskiEffectsSettings, DESKI_OT_ice)
+classes = (DeskiEffectsSettings, DESKI_OT_ice, DESKI_OT_carpet)
 
 
 def register():
