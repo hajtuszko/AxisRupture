@@ -713,9 +713,9 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
     def job(self, context):
         """generator: (postep 0..1, tekst) ... -> (poziom, komunikat)"""
         p = context.scene.deski_przygotowanie
-        src_objs = [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
+        src_objs = [o for o in (p.source,) if o and o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
         if not src_objs:
-            return 'ERROR', "W kolekcji nie ma plaszczyzn z UV"
+            return 'ERROR', "Wskaz plaszczyzne (siatka z UV i tekstura desek)"
         out = bpy.data.collections.new(p.output_name or (p.source.name + " - deski"))
         context.scene.collection.children.link(out)
         total, msgs = 0, []
@@ -1034,9 +1034,14 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
 
 
 # ---------------------------------------------------------------- ustawienia + panel
+def _plane_poll(self, o):
+    return o.type == 'MESH' and len(o.data.uv_layers) > 0
+
+
 class DeskiPrepSettings(bpy.types.PropertyGroup):
-    source: bpy.props.PointerProperty(name="Plaszczyzny", type=bpy.types.Collection,
-                                      description="Kolekcja z plaszczyznami podlogi (z UV i tekstura desek)")
+    source: bpy.props.PointerProperty(name="Płaszczyzna", type=bpy.types.Object, poll=_plane_poll,
+                                      description="Płaszczyzna podłogi do podziału (siatka z UV i teksturą desek) - "
+                                                  "wybierz z listy albo pipetą w widoku")
     texture: bpy.props.PointerProperty(name="Tekstura (opcj.)", type=bpy.types.Image,
                                        description="Obraz do wykrycia szczelin. Puste = z materialu (AO/Cavity, potem Base Color)")
     output_name: bpy.props.StringProperty(name="Kolekcja wynikowa", default="",
@@ -1115,7 +1120,7 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
             bpy.data.objects.remove(old)
         bm = bmesh.new()
         cache, info = _CACHE, []
-        srcs = [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
+        srcs = [o for o in (p.source,) if o and o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
         for si, src in enumerate(srcs):
             img = find_texture(src, p.texture)
             if img is None or img.size[0] == 0:

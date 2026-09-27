@@ -49,7 +49,7 @@ class DESKI_PT_prep(Panel):
         p = context.scene.deski_przygotowanie
         L = self.layout
         col = split(L.column())
-        col.prop(p, "source", text="Płaszczyzny")
+        col.prop(p, "source", text="Płaszczyzna")
         col.prop(p, "texture", text="Tekstura")
         col.prop(p, "output_name", text="Wynik")
         L.row().prop(p, "layout", expand=True)
