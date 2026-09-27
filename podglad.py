@@ -162,6 +162,9 @@ def _watched(sc):
         ob = getattr(pw, k, None)
         if ob:
             names.add(ob.name)
+    ob = sc.deski_detale.decay_source
+    if ob:
+        names.add(ob.name)
     return names
 
 

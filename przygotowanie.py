@@ -411,6 +411,52 @@ def cell_quad(grid, size, i0, i1, j0, j1, shrink):
     return jd.cell_quad(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
 
 
+def cell_poly(grid, size, i0, i1, j0, j1, shrink):
+    return jd.cell_poly(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
+
+
+def ccw(poly):
+    a = sum(poly[q - 1][0] * poly[q][1] - poly[q][0] * poly[q - 1][1] for q in range(len(poly)))
+    return list(poly) if a > 0 else list(poly)[::-1]
+
+
+def simplify_outline(pts, tol_uv):
+    """Douglas-Peucker dla zamknietego obrysu (UV); narozniki (najdalsze punkty) zostaja.
+    tol < polowy szczeliny -> sasiednie deski nadal nie nachodza na siebie"""
+    n = len(pts)
+    if n <= 4 or tol_uv <= 0:
+        return pts
+    import math as _m
+
+    def dist(q, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-30:
+            return _m.hypot(q[0] - a[0], q[1] - a[1])
+        return abs((q[0] - a[0]) * dy - (q[1] - a[1]) * dx) / _m.sqrt(L2)
+
+    def dp(seq):
+        if len(seq) <= 2:
+            return seq
+        a, b = seq[0], seq[-1]
+        i, d = max(((i, dist(seq[i], a, b)) for i in range(1, len(seq) - 1)), key=lambda t: t[1])
+        if d <= tol_uv:
+            return [a, b]
+        return dp(seq[:i + 1])[:-1] + dp(seq[i:])
+    # podzial na dwa luki miedzy najbardziej odleglymi punktami
+    j = max(range(n), key=lambda k: (pts[k][0] - pts[0][0]) ** 2 + (pts[k][1] - pts[0][1]) ** 2)
+    i0 = max(range(n), key=lambda k: (pts[k][0] - pts[j][0]) ** 2 + (pts[k][1] - pts[j][1]) ** 2)
+    r = pts[i0:] + pts[:i0]
+    j = (j - i0) % n
+    out = dp(r[:j + 1])[:-1] + dp(r[j:] + [r[0]])[:-1]
+    return out if len(out) >= 3 else pts
+
+
+def clip_board(board_poly, face_uv):
+    """obrys deski (dowolny, lekko wygiety) przyciety do sciany plaszczyzny (wypukla)"""
+    return clip_convex(board_poly, ccw(face_uv))
+
+
 def calibrate_straight(S, axis, seams, bands):
     """kalibracja lokalna prostych desek: kazda dluga szczelina (w odcinkach ~ szerokosc deski) i kazde
     laczenie (koniec deski) mierzone osobno; z pewnych pomiarow gladkie pole korekty (jak w jodelce)"""
@@ -474,13 +520,22 @@ def straight_detect_cached(cache, img, p):
     return cache[key]
 
 
-def warp_rect(field, size, r):
-    """prostokat UV (u0, u1, v0, v1) -> czworokat CCW z naroznikami przesunietymi polem korekty"""
+def warp_rect(field, size, r, step=None):
+    """prostokat UV (u0, u1, v0, v1) -> obrys CCW przesuniety polem korekty; boki probkowane co 'step'
+    (UV), zeby sasiednie deski mialy wspolna linie szczeliny"""
     import numpy as np
     u0, u1, v0, v1 = r
-    cs = np.array([(u0, v0), (u1, v0), (u1, v1), (u0, v1)], float)
+
+    def ticks(a, b):
+        if not step or b - a <= step:
+            return [a, b]
+        n = int(math.ceil((b - a) / step))
+        return [a + (b - a) * i / n for i in range(n + 1)]
+    tu, tv = ticks(u0, u1), ticks(v0, v1)
+    pts = [(u, v0) for u in tu] + [(u1, v) for v in tv[1:]] + [(u, v1) for u in tu[-2::-1]] + [(u0, v) for v in tv[-2:0:-1]]
+    cs = np.array(pts, float)
     Dp = jd.field_at(field, cs[:, 0] * size[0], cs[:, 1] * size[1])
-    return [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(4)]
+    return [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(len(cs))]
 
 
 # ---------------------------------------------------------------- operator
@@ -531,7 +586,8 @@ class DESKI_OT_split(bpy.types.Operator):
                         cache[("n", cimg.name)] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
                     dots = cache[("n", cimg.name)]
             n, nn = self.split_object(context, src, out, axis, bands, p, dots,
-                                      warp=(lambda r, f=field, z=fsize: warp_rect(f, z, r)) if field else None)
+                                      warp=(lambda r, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
+                                            warp_rect(f, z, r, st)) if field else None)
             total += n
             msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
                         + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
@@ -564,12 +620,13 @@ class DESKI_OT_split(bpy.types.Operator):
         m_cell = (f30(u0 + d[0] / size[0], v0 + d[1] / size[1]) - f30(u0, v0)).length * \
             max(src.matrix_world.to_scale())
         shrink = (p.gap / 2) / max(m_cell, 1e-9)
+        tol_uv = (p.gap * 0.45) / max(m_cell, 1e-9) * (np.linalg.norm(d) / max(size))   # 0.45 szczeliny w UV (2x0.45 < szczelina: bez nachodzenia)
         count = 0
         for key, ((i0, i1, j0, j1), (du, dv)) in sorted(herring_layout(src, grid, model, size).items()):
-            quad = cell_quad(grid, size, i0, i1, j0, j1, shrink)
+            quad = simplify_outline(cell_poly(grid, size, i0, i1, j0, j1, shrink), tol_uv)
             polys, along = [], None
             for fuv, f3, mat in faces:
-                cl = clip_convex(fuv, quad)
+                cl = clip_board(quad, fuv)
                 if len(cl) < 3:
                     continue
                 polys.append(([(f3(u, v), (u, v)) for u, v in cl], mat))
@@ -663,7 +720,8 @@ class DESKI_OT_split(bpy.types.Operator):
                             r = (c0 + g_alg, c1 - g_alg, A + g_acr, Bb - g_acr)
                         if r[0] >= r[1] or r[2] >= r[3]:
                             continue
-                        cl = clip_convex(fuv, warp(r)) if warp else clip_rect(fuv, *r)
+                        cl = clip_board(simplify_outline(warp(r), p.gap * 0.45 / max(m_per_uv, 1e-9)), fuv) \
+                            if warp else clip_rect(fuv, *r)
                         if len(cl) < 3:
                             continue
                         pts = [(f3(u, v), (u, v)) for u, v in cl]
@@ -933,12 +991,12 @@ class DESKI_OT_split_preview(bpy.types.Operator):
                         f"zgodnosc {model[0]:.4f}")
             me = src.data; uv = me.uv_layers.active.data; mw = src.matrix_world
             for (i0, i1, j0, j1), _ in herring_layout(src, grid, model, size).values():
-                quad = cell_quad(grid, size, i0, i1, j0, j1, 0.0)
+                quad = cell_poly(grid, size, i0, i1, j0, j1, 0.0)
                 for poly in me.polygons:
                     aff = face_uv_affine(me, poly, uv)
                     if not aff:
                         continue
-                    cl = clip_convex([tuple(uv[l].uv) for l in poly.loop_indices], quad)
+                    cl = clip_board(quad, [tuple(uv[l].uv) for l in poly.loop_indices])
                     if len(cl) < 3:
                         continue
                     nrm = (mw.to_3x3() @ poly.normal).normalized()

@@ -348,6 +348,29 @@ def cell_quad(lat, size, i0, i1, j0, j1, shrink, field=None):
     return pts if area > 0 else pts[::-1]
 
 
+def cell_poly(lat, size, i0, i1, j0, j1, shrink, field=None):
+    """obrys deski (CCW, UV) z punktem w kazdym wezle siatki na bokach; kazdy punkt przesuniety tym samym
+    polem korekty -> sasiednie deski maja wspolna (odsunieta o szczeline) linie szczeliny, bez nachodzenia"""
+    import numpy as np
+    N1, N2, u, p1, p2, k = lat
+    w, h = size
+    Minv = np.linalg.inv(np.array([N1, N2]))
+    a0, a1, b0, b1 = i0 + shrink, i1 - shrink, j0 + shrink, j1 - shrink
+
+    def ticks(lo, hi, c0, c1):
+        inner = [float(t) for t in range(c0 + 1, c1)]
+        return [lo] + inner + [hi]
+    ta = ticks(a0, a1, i0, i1); tb = ticks(b0, b1, j0, j1)
+    pts = [(a, b0) for a in ta] + [(a1, b) for b in tb[1:]] + [(a, b1) for a in ta[-2::-1]] + [(a0, b) for b in tb[-2:0:-1]]
+    A = np.array([p1 + a * u for a, _ in pts]); B = np.array([p2 + b * u for _, b in pts])
+    X = Minv[0, 0] * A + Minv[0, 1] * B; Y = Minv[1, 0] * A + Minv[1, 1] * B
+    if field is not None:
+        Dp = field_at(field, X, Y); X = X + Dp[0]; Y = Y + Dp[1]
+    out = [(float(x / w), float(y / h)) for x, y in zip(X, Y)]
+    area = sum(out[q - 1][0] * out[q][1] - out[q][0] * out[q - 1][1] for q in range(len(out)))
+    return out if area > 0 else out[::-1]
+
+
 def along_uv(lat, size, i0, i1, j0, j1, field=None):
     """kierunek dlugiej osi deski w UV (z uwzglednieniem pola korekty)"""
     import numpy as np
