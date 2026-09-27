@@ -446,6 +446,12 @@ def cell_poly(grid, size, i0, i1, j0, j1, shrink):
     return jd.cell_poly(grid[:6], size, i0, i1, j0, j1, shrink, grid[6])
 
 
+def board_quad(grid, size, i0, i1, j0, j1, shrink, tol=0.0):
+    """czworokat deski jodelki (4 wierzcholki) zawarty w komorce wyznaczonej przez pole korekty"""
+    pts, na, nb = jd.cell_poly(grid[:6], size, i0, i1, j0, j1, shrink, grid[6], raw=True)
+    return contain_quad(pts, na, nb, tol)
+
+
 def ccw(poly):
     a = sum(poly[q - 1][0] * poly[q][1] - poly[q][0] * poly[q - 1][1] for q in range(len(poly)))
     return list(poly) if a > 0 else list(poly)[::-1]
@@ -481,6 +487,38 @@ def simplify_outline(pts, tol_uv):
     j = (j - i0) % n
     out = dp(r[:j + 1])[:-1] + dp(r[j:] + [r[0]])[:-1]
     return out if len(out) >= 3 else pts
+
+
+def contain_quad(pts, na, nb, tol=0.0):
+    """Obrys probkowany (boki: na, nb, na, nb punktow, narozniki wspolne) -> czworokat CCW o 4 wierzcholkach,
+    zawarty w obrysie: bok, pod ktorym krzywa szczeliny wchodzi do srodka, cofany rownolegle o te glebokosc.
+    Wszystkie deski leza w swoich (rozlacznych) komorkach -> nie nachodza na siebie, bez dodatkowych punktow."""
+    ci = [0, na - 1, na - 1 + nb - 1, 2 * (na - 1) + nb - 1]
+    n = len(pts)
+    area = sum(pts[q - 1][0] * pts[q][1] - pts[q][0] * pts[q - 1][1] for q in range(n))
+    sg = 1.0 if area > 0 else -1.0
+    lines = []
+    for k in range(4):
+        a, b = ci[k], (ci[(k + 1) % 4] if k < 3 else n)
+        A, B = pts[a], pts[b % n]
+        dx, dy = B[0] - A[0], B[1] - A[1]
+        L = math.hypot(dx, dy) or 1e-12
+        nx, ny = -dy / L * sg, dx / L * sg              # normalna do srodka
+        off = 0.0
+        for q in range(a + 1, b):
+            P = pts[q % n]
+            off = max(off, (P[0] - A[0]) * nx + (P[1] - A[1]) * ny)
+        off = max(0.0, off - tol)                       # pol szczeliny zapasu: sasiad robi to samo -> bez przeciec
+        lines.append(((A[0] + nx * off, A[1] + ny * off), (dx, dy)))
+    quad = []
+    for k in range(4):
+        (p0, d0), (p1, d1) = lines[k - 1], lines[k]
+        den = d0[0] * d1[1] - d0[1] * d1[0]
+        if abs(den) < 1e-18:
+            quad.append(p1); continue
+        t = ((p1[0] - p0[0]) * d1[1] - (p1[1] - p0[1]) * d1[0]) / den
+        quad.append((p0[0] + d0[0] * t, p0[1] + d0[1] * t))
+    return ccw(quad)
 
 
 def clip_board(board_poly, face_uv):
@@ -559,7 +597,7 @@ def straight_detect_iter(cache, img, p):
     return cache[key]
 
 
-def warp_rect(field, size, r, step=None):
+def warp_rect(field, size, r, step=None, tol=0.0):
     """prostokat UV (u0, u1, v0, v1) -> obrys CCW przesuniety polem korekty; boki probkowane co 'step'
     (UV), zeby sasiednie deski mialy wspolna linie szczeliny"""
     import numpy as np
@@ -574,7 +612,8 @@ def warp_rect(field, size, r, step=None):
     pts = [(u, v0) for u in tu] + [(u1, v) for v in tv[1:]] + [(u, v1) for u in tu[-2::-1]] + [(u0, v) for v in tv[-2:0:-1]]
     cs = np.array(pts, float)
     Dp = jd.field_at(field, cs[:, 0] * size[0], cs[:, 1] * size[1])
-    return [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(len(cs))]
+    out = [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(len(cs))]
+    return contain_quad(out, len(tu), len(tv), tol)
 
 
 # ---------------------------------------------------------------- dlugie zadania: porcjami, z paskiem postepu
@@ -711,8 +750,8 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                         cache[nk] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
                     dots = cache[nk]
             n, nn = yield from _sub(self.split_object(context, src, out, axis, bands, p, dots,
-                                                      warp=(lambda r, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
-                                                            warp_rect(f, z, r, st)) if field else None), mid, hi)
+                                                      warp=(lambda r, tl=0.0, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
+                                                            warp_rect(f, z, r, st, tl)) if field else None), mid, hi)
             total += n
             msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
                         + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
@@ -745,13 +784,13 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         m_cell = (f30(u0 + d[0] / size[0], v0 + d[1] / size[1]) - f30(u0, v0)).length * \
             max(src.matrix_world.to_scale())
         shrink = (p.gap / 2) / max(m_cell, 1e-9)
-        tol_uv = (p.gap * 0.45) / max(m_cell, 1e-9) * (np.linalg.norm(d) / max(size))   # 0.45 szczeliny w UV (2x0.45 < szczelina: bez nachodzenia)
+        tol_uv = (p.gap / 2) / max(m_cell, 1e-9) * (np.linalg.norm(d) / max(size))   # pol szczeliny w UV
         count = 0
         items = sorted(herring_layout(src, grid, model, size).items())
         for bi, (key, ((i0, i1, j0, j1), (du, dv))) in enumerate(items):
             if bi % 10 == 0:
                 yield (bi / max(len(items), 1), f"deski {count} (uklad {bi}/{len(items)})")
-            quad = simplify_outline(cell_poly(grid, size, i0, i1, j0, j1, shrink), tol_uv)
+            quad = board_quad(grid, size, i0, i1, j0, j1, shrink, tol_uv)
             polys, along = [], None
             for fuv, f3, mat in faces:
                 cl = clip_board(quad, fuv)
@@ -849,8 +888,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                             r = (c0 + g_alg, c1 - g_alg, A + g_acr, Bb - g_acr)
                         if r[0] >= r[1] or r[2] >= r[3]:
                             continue
-                        cl = clip_board(simplify_outline(warp(r), p.gap * 0.45 / max(m_per_uv, 1e-9)), fuv) \
-                            if warp else clip_rect(fuv, *r)
+                        cl = clip_board(warp(r, (p.gap / 2) / max(m_per_uv, 1e-9)), fuv) if warp else clip_rect(fuv, *r)
                         if len(cl) < 3:
                             continue
                         pts = [(f3(u, v), (u, v)) for u, v in cl]
@@ -1125,7 +1163,7 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
                         f"zgodnosc {model[0]:.4f}")
             me = src.data; uv = me.uv_layers.active.data; mw = src.matrix_world
             for (i0, i1, j0, j1), _ in herring_layout(src, grid, model, size).values():
-                quad = cell_poly(grid, size, i0, i1, j0, j1, 0.0)
+                quad = board_quad(grid, size, i0, i1, j0, j1, 0.0)
                 for poly in me.polygons:
                     aff = face_uv_affine(me, poly, uv)
                     if not aff:

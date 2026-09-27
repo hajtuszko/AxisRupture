@@ -370,7 +370,7 @@ def cell_quad(lat, size, i0, i1, j0, j1, shrink, field=None):
     return pts if area > 0 else pts[::-1]
 
 
-def cell_poly(lat, size, i0, i1, j0, j1, shrink, field=None):
+def cell_poly(lat, size, i0, i1, j0, j1, shrink, field=None, raw=False):
     """obrys deski (CCW, UV) z punktem w kazdym wezle siatki na bokach; kazdy punkt przesuniety tym samym
     polem korekty -> sasiednie deski maja wspolna (odsunieta o szczeline) linie szczeliny, bez nachodzenia"""
     import numpy as np
@@ -389,6 +389,8 @@ def cell_poly(lat, size, i0, i1, j0, j1, shrink, field=None):
     if field is not None:
         Dp = field_at(field, X, Y); X = X + Dp[0]; Y = Y + Dp[1]
     out = [(float(x / w), float(y / h)) for x, y in zip(X, Y)]
+    if raw:
+        return out, len(ta), len(tb)
     area = sum(out[q - 1][0] * out[q][1] - out[q][0] * out[q - 1][1] for q in range(len(out)))
     return out if area > 0 else out[::-1]
 
