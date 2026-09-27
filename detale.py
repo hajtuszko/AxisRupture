@@ -4,6 +4,7 @@ import bpy, bmesh, math, random, zlib
 from mathutils import Vector, Matrix
 from mathutils.bvhtree import BVHTree
 from .przygotowanie import fit_top_uv, unfold_uv, top_outline
+from .wyrwanie import Settings
 
 NAIL_MESH = "Deski_Gwozdz"
 
@@ -20,6 +21,15 @@ def board_frame(o):
     B = R @ Matrix.Translation(-(mn + mx) / 2)
     L, W = (size.x, size.y) if size.x >= size.y else (size.y, size.x)
     return B, L, W, size.z
+
+
+def no_ngons(bm):
+    """wszystkie n-gony -> trojkaty, potem z powrotem w czworokaty tam, gdzie plasko"""
+    ng = [f for f in bm.faces if len(f.verts) > 4]
+    if ng:
+        r = bmesh.ops.triangulate(bm, faces=ng, quad_method='BEAUTY', ngon_method='BEAUTY')
+        bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.radians(5),
+                                 angle_shape_threshold=math.pi, cmp_uvs=True, cmp_materials=True)
 
 
 def triangulate_ngons(bm, faces):
@@ -148,6 +158,68 @@ def warp_board(bm, warp):
     triangulate_ngons(bm, bm.faces[:])
 
 
+# ---------------------------------------------------------------- spalenie / zbutwienie
+ATTR = {"SPALENIE": "deski_spalenie", "BUTWIENIE": "deski_butwienie"}
+
+
+def _sm(t):
+    t = max(0.0, min(1.0, t)); return t * t * (3 - 2 * t)
+
+
+def decay_mask(p, pos):
+    """sila spalenia / zbutwienia 0..1 w punkcie swiata: obszar z Empty (poszarpany brzeg z szumu)
+    albo losowe plamy o zadanym pokryciu"""
+    from mathutils import noise
+    sc = max(p.decay_scale, 1e-3)
+    n = noise.noise(pos / sc + Vector((p.seed * 1.37, p.seed * 0.71, 0.0)))
+    if p.decay_mode == 'OBSZAR':
+        e = p.decay_source
+        if e is None:
+            return 0.0
+        q = e.matrix_world.inverted() @ pos
+        R = e.empty_display_size if e.type == 'EMPTY' else max(max(e.dimensions.x, e.dimensions.y) / 2, 1e-3)
+        d = math.hypot(q.x, q.y) / max(R, 1e-4) + 0.35 * n
+        return _sm((1 - d) / 0.35)
+    return _sm(((n + 1) / 2 - (1 - p.decay_coverage)) / 0.2)
+
+
+def decay_material(mat, kind):
+    """kopia materialu z przyciemnieniem (zweglenie / butwienie) i wieksza szorstkoscia wg atrybutu -
+    oryginalny material zostaje nietkniety"""
+    if mat is None or not mat.use_nodes:
+        return mat
+    name = f"{mat.name} ({'spalenie' if kind == 'SPALENIE' else 'butwienie'})"
+    m2 = bpy.data.materials.get(name)
+    if m2 is not None:
+        return m2
+    m2 = mat.copy(); m2.name = name; m2["deski_mat_scen"] = 1
+    nt = m2.node_tree
+    bsdf = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is None:
+        return m2
+    at = nt.nodes.new('ShaderNodeAttribute'); at.attribute_type = 'GEOMETRY'; at.attribute_name = ATTR[kind]
+    at.location = bsdf.location + Vector((-700, 300))
+    col = (0.012, 0.010, 0.009, 1.0) if kind == 'SPALENIE' else (0.13, 0.13, 0.10, 1.0)
+    for sock_name, dtype, val in (("Base Color", 'RGBA', col), ("Roughness", 'FLOAT', 0.95)):
+        inp = bsdf.inputs.get(sock_name)
+        if inp is None:
+            continue
+        mix = nt.nodes.new('ShaderNodeMix'); mix.data_type = dtype
+        mix.location = bsdf.location + Vector((-300, 200 if dtype == 'RGBA' else -50))
+        A = next(s for s in mix.inputs if s.name == "A" and s.enabled)
+        Bs = next(s for s in mix.inputs if s.name == "B" and s.enabled)
+        out = next(s for s in mix.outputs if s.enabled)
+        fac = next(s for s in mix.inputs if s.name == "Factor" and s.enabled)
+        if inp.is_linked:
+            nt.links.new(inp.links[0].from_socket, A)
+        else:
+            A.default_value = inp.default_value
+        Bs.default_value = val
+        nt.links.new(at.outputs["Fac"], fac)
+        nt.links.new(out, inp)
+    return m2
+
+
 # ---------------------------------------------------------------- pekniecie deski
 def crack_board(bm, L, W, T, rng, p):
     """pekniecie w poprzek po poszarpanej linii: deska dzieli sie na dwa zamkniete kawalki,
@@ -171,7 +243,7 @@ def crack_board(bm, L, W, T, rng, p):
     # poszarpana linia: przesuniecie wzdluz deski zalezne od polozenia w poprzek
     ys = sorted({round(v.co.y, 5) for v in ring_v})
     off = {y: rng.uniform(-1, 1) * amp for y in ys}
-    for v in ring_v:
+    for v in sorted(ring_v, key=lambda v: (round(v.co.y, 5), round(v.co.z, 5), round(v.co.x, 5))):  # stala kolejnosc losowan
         v.co.x += off[round(v.co.y, 5)] + rng.uniform(-0.1, 0.1) * amp
     bmesh.ops.split_edges(bm, edges=ring)
     bnd = [e for e in bm.edges if e.is_boundary]
@@ -279,21 +351,12 @@ def nail_mesh(p):
 
 
 # ---------------------------------------------------------------- operator
-class DESKI_OT_details(bpy.types.Operator):
-    bl_idname = "object.deski_detale"
-    bl_label = "Dodaj detale"
-    bl_description = ("Nierownosci nietknietych desek, drzazgi i odksztalcenie wyrwanych desek, "
-                      "gwozdzie wyrwane razem z deskami")
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return (context.scene.deski_detale.boards or context.scene.deski_teren.boards) is not None
-
-    def execute(self, context):
-        p = context.scene.deski_detale
-        coll = p.boards or context.scene.deski_teren.boards
-        terrain = context.scene.deski_teren.terrain
+class DetailCore:
+    def run(self, context, p, coll=None):
+        """caly etap 3; zwraca (poziom, komunikat)"""
+        coll = coll or p.boards or context.scene.deski_teren.boards
+        pw = context.scene.deski_teren
+        terrain = pw.terrain if pw.scenario == 'TEREN' else None
         self.TB = None
         if terrain:
             dg = context.evaluated_depsgraph_get()
@@ -302,9 +365,10 @@ class DESKI_OT_details(bpy.types.Operator):
             self.TB = BVHTree.FromPolygons(vs, [tuple(q.vertices) for q in me.polygons])
             self.ttop = max(v.z for v in vs)
             te.to_mesh_clear()
-        boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices
+        boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices and not o.data.shape_keys
                   and not o.name.startswith(NAIL_MESH) and o.dimensions.z > 1e-4]
-        st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "pekniete": 0, "gwozdzie": 0, "pominiete": 0}
+        st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "pekniete": 0, "gwozdzie": 0, "pominiete": 0,
+              "rozklad": 0}
         backup = {}                                    # deska -> (siatka, macierz) sprzed detali
         for o in boards:
             if o.get("deski_detale"):
@@ -328,6 +392,17 @@ class DESKI_OT_details(bpy.types.Operator):
                     s, w, c = self.damage(o, rng, p, allow_crack=False)
                 st["drzazgi"] += s; st["odksztalcone"] += w; st["pekniete"] += c
             o["deski_detale"] = 1
+        # spalenie / zbutwienie (wszystkie deski w obszarze, takze nietkniete)
+        if p.use_decay:
+            for o in boards:
+                if o.get("deski_faza") == "wyrzucona" or o.hide_render or o.get("deski_rozklad"):
+                    continue
+                rng = random.Random(p.seed * 15485863 + zlib.crc32(o.name.encode()))
+                had = o in backup
+                if not had:
+                    backup[o] = (o.data.copy(), o.matrix_world.copy())
+                if self.decay(o, rng, p):
+                    st["rozklad"] += 1; o["deski_rozklad"] = 1
         # detale nie moga wcisnac deski w sasiednia - takie zmiany sa cofane
         context.view_layer.update()
         reverted = 0
@@ -347,19 +422,22 @@ class DESKI_OT_details(bpy.types.Operator):
             for o in boards:
                 if o.get("deski_gwozdzie") and not o.get("deski_gwozdzie_dodane"):
                     if nails_coll is None:
-                        nails_coll = bpy.data.collections.new(coll.name + " - gwozdzie")
-                        context.scene.collection.children.link(nails_coll)
+                        nails_coll = bpy.data.collections.get(coll.name + " - gwozdzie")
+                        if nails_coll is None:
+                            nails_coll = bpy.data.collections.new(coll.name + " - gwozdzie")
+                            context.scene.collection.children.link(nails_coll)
                     rng = random.Random(p.seed * 104729 + zlib.crc32(o.name.encode()))
                     st["gwozdzie"] += self.nails(o, rng, p, nails_coll)
                     o["deski_gwozdzie_dodane"] = 1
         msg = (f"Detale: nierownosci {st['nierownosci']}, drzazgi (konce) {st['drzazgi']}, "
                f"odksztalcone {st['odksztalcone']}, pekniete {st['pekniete']}, gwozdzie {st['gwozdzie']}")
+        if st["rozklad"]:
+            msg += f", {'spalone' if p.decay_type == 'SPALENIE' else 'zbutwiale'} {st['rozklad']}"
         if reverted:
             msg += f", cofniete (kolizja z sasiednia deska) {reverted}"
         if st["pominiete"]:
             msg += f", pominiete (juz maja detale) {st['pominiete']}"
-        self.report({'INFO'}, msg)
-        return {'FINISHED'}
+        return 'INFO', msg
 
     # --- kontrola: zmienione deski, ktore przenikaja sasiednie o wiecej niz 1 mm
     def penetrating(self, boards, changed):
@@ -438,7 +516,8 @@ class DESKI_OT_details(bpy.types.Operator):
         R = (Rb @ Matrix.Rotation(yaw, 3, 'Z') @ Matrix.Rotation(roll, 3, 'X') @ Matrix.Rotation(pitch, 3, 'Y')
              @ Rb.inverted()).to_4x4()
         M = Matrix.Translation(pivot) @ R @ Matrix.Translation(-pivot)
-        if p.use_twist_nailed and p.twist_nailed > 0:
+        short = L < bpy.context.scene.deski_teren.bend_min_length
+        if p.use_twist_nailed and p.twist_nailed > 0 and not short:
             # lekkie zwichrowanie przybitej deski (unosza sie narozniki) - 2 petle
             if o.data.users > 1:
                 o.data = o.data.copy()
@@ -480,12 +559,13 @@ class DESKI_OT_details(bpy.types.Operator):
                 f, zone = res
                 npts = [f(q) for q in npts]; cracked = 1
                 avoid = [zone]                          # petle odksztalcenia omijaja linie pekniecia
-        if p.use_warp:
+        if p.use_warp and L >= bpy.context.scene.deski_teren.bend_min_length:
             add_loops(bm, L, p.warp_loops, end_margin, avoid=avoid)
             warp = Warp(L, rng.uniform(0.3, 1.0) * p.warp_bow * L * rng.choice((-1, 1)),
                         math.radians(p.warp_twist) * rng.uniform(-1, 1))
             warp_board(bm, warp)
             npts = [warp(q) for q in npts]; warped = 1
+        no_ngons(bm)
         bm.transform(B.inverted())
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.to_mesh(o.data); bm.free(); o.data.update()
@@ -496,6 +576,85 @@ class DESKI_OT_details(bpy.types.Operator):
             o["deski_gwozdzie"] = nd
         self.lift_clear(o, o.get("deski_podloga"))
         return n_spl, warped, cracked
+
+    # --- spalenie / zbutwienie
+    def decay(self, o, rng, p):
+        """krawedzie zjedzone do srodka (nieregularnie), plaska deska ciensza, konce poszarpane,
+        atrybut 0..1 do materialu. Petle dodawane tylko tam, gdzie efekt siega."""
+        from mathutils import noise
+        B, L, W, T = board_frame(o)
+        mw = o.matrix_world
+        toW = mw @ B.inverted()
+        ns = max(3, int(L / 0.02))
+        xs = [-L / 2 + L * i / (ns - 1) for i in range(ns)]
+        ms = [decay_mask(p, toW @ Vector((x, 0, 0))) for x in xs]
+        if max(ms) < 0.05:
+            return False
+        if o.data.users > 1:
+            o.data = o.data.copy()
+        bm = bmesh.new(); bm.from_mesh(o.data); bm.transform(B)
+        zmin = min(v.co.z for v in bm.verts); zmax = max(v.co.z for v in bm.verts)
+        flat = (zmax - zmin) < T * 1.05 + 1e-5
+        uv = top_uv(bm, L, p) if flat else None
+        # konce mocno objete efektem - poszarpane (jak drzazgi)
+        for sgn, m_end in ((-1, ms[0]), (1, ms[-1])):
+            if m_end > 0.35 and flat:
+                q = Settings(p, splinter_depth=min(0.25 * L, p.splinter_depth * (0.6 + m_end)), splinter_out=0.0)
+                splinter_end(bm, sgn, L, W, T, rng, q)
+        # petle w strefie efektu (co decay_seg), z dala od istniejacych
+        have = sorted({round(v.co.x, 4) for v in bm.verts})
+        seg = max(p.decay_seg, 0.005)
+        x = -L / 2 + seg
+        while x < L / 2 - seg * 0.5:
+            i = min(ns - 1, max(0, int(round((x + L / 2) / L * (ns - 1)))))
+            if ms[i] > 0.08 and all(abs(x - h) > 0.4 * seg for h in have):
+                bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+                                       plane_co=Vector((x, 0, 0)), plane_no=Vector((1, 0, 0)))
+                have.append(x)
+            x += seg
+        triangulate_ngons(bm, bm.faces[:])
+        # krawedzie zjedzone do srodka: przesuniecie malejace ku srodkowi (bez odwracania kolejnosci)
+        dmax = min(p.decay_erode, 0.3 * W)
+        band = 2.0 * max(dmax, 1e-4)
+        vals = {}
+        for v in bm.verts:
+            wp = toW @ v.co
+            m = decay_mask(p, wp)
+            nz = noise.noise(wp * 20.0)
+            vals[v] = (m, nz)
+            if m <= 0:
+                continue
+            ay = abs(v.co.y)
+            f = _sm((ay - (W / 2 - band)) / band)
+            v.co.y -= math.copysign(dmax * m * (0.55 + 0.45 * nz) * f, v.co.y)
+        if uv:
+            reuv(uv, bm.faces[:])
+        # plaska deska: ciensza (gorna czesc sciskana ku spodowi - kolejnosc warstw zachowana)
+        if flat and p.decay_thin > 0:
+            for v, (m, nz) in vals.items():
+                if m > 0 and v.is_valid:
+                    k = 1 - p.decay_thin * m * (0.6 + 0.4 * nz)
+                    v.co.z = zmin + (v.co.z - zmin) * k
+        no_ngons(bm)
+        bm.transform(B.inverted())
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        bm.to_mesh(o.data); bm.free(); o.data.update()
+        # atrybut: mocniej przy krawedziach i koncach
+        me = o.data
+        name = ATTR[p.decay_type]
+        att = me.attributes.get(name) or me.attributes.new(name, 'FLOAT', 'POINT')
+        out = []
+        for v in me.vertices:
+            q = B @ v.co
+            wp = mw @ v.co
+            m = decay_mask(p, wp)
+            edge = 1 - min(1.0, min(W / 2 - abs(q.y), L / 2 - abs(q.x)) / (0.25 * W))
+            out.append(max(0.0, min(1.0, m * (0.75 + 0.35 * edge) + 0.15 * noise.noise(wp * 8.0) * m)))
+        att.data.foreach_set("value", out)
+        if p.decay_material:
+            for i, mat in enumerate(me.materials):
+                me.materials[i] = decay_material(mat, p.decay_type)
+        return True
 
     # --- 7: gwozdzie wyrwane razem z deska (wystaja spod deski)
     def nails(self, o, rng, p, coll):
@@ -520,10 +679,30 @@ class DESKI_OT_details(bpy.types.Operator):
                 continue                               # czubek bylby w terenie / podlodze - pomijamy
             nob = bpy.data.objects.new(o.name + "_Gwozdz", me)
             coll.objects.link(nob)
+            nob["deski_gwozdz"] = 1
             nob.parent = o
             nob.matrix_world = M
             made += 1
         return made
+
+
+class DESKI_OT_details(DetailCore, bpy.types.Operator):
+    bl_idname = "object.deski_detale"
+    bl_label = "Dodaj detale"
+    bl_description = ("Nierownosci nietknietych desek, drzazgi i odksztalcenie wyrwanych desek, "
+                      "gwozdzie wyrwane razem z deskami")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        pg = getattr(context.scene, "deski_podglad", None)
+        return ((context.scene.deski_detale.boards or context.scene.deski_teren.boards) is not None
+                and not (pg and pg.active))
+
+    def execute(self, context):
+        lvl, msg = self.run(context, context.scene.deski_detale)
+        self.report({lvl}, msg)
+        return {'FINISHED'}
 
 
 # ---------------------------------------------------------------- ustawienia + panel
@@ -565,36 +744,32 @@ class DeskiDetailSettings(bpy.types.PropertyGroup):
     nail_diameter: bpy.props.FloatProperty(name="Srednica", default=0.003, min=0.0005, unit='LENGTH')
     nail_head: bpy.props.FloatProperty(name="Srednica lba", default=0.008, min=0.001, unit='LENGTH')
     nail_tilt: bpy.props.FloatProperty(name="Maks. odchylenie (st.)", default=20.0, min=0.0, max=80.0)
+    use_decay: bpy.props.BoolProperty(name="Spalenie / zbutwienie", default=False)
+    decay_type: bpy.props.EnumProperty(name="Rodzaj", default='SPALENIE', items=(
+        ('SPALENIE', "Spalenie", "Zweglone, zjedzone krawedzie i konce, ciemny material"),
+        ('BUTWIENIE', "Zbutwienie", "Zmurszale krawedzie, szarozielony nalot")))
+    decay_mode: bpy.props.EnumProperty(name="Obszar", default='OBSZAR', items=(
+        ('OBSZAR', "Z obiektu", "Srodek i promien z Empty (brzeg poszarpany szumem)"),
+        ('LOSOWO', "Losowe plamy", "Plamy z szumu na calej podlodze")))
+    decay_source: bpy.props.PointerProperty(name="Zrodlo", type=bpy.types.Object,
+                                            description="Empty: srodek i promien (rozmiar Empty) obszaru")
+    decay_coverage: bpy.props.FloatProperty(name="Pokrycie", default=0.3, min=0.0, max=1.0, subtype='FACTOR')
+    decay_scale: bpy.props.FloatProperty(name="Skala plam", default=0.5, min=0.01, unit='LENGTH')
+    decay_erode: bpy.props.FloatProperty(name="Zjedzenie krawedzi", default=0.012, min=0.0, unit='LENGTH')
+    decay_thin: bpy.props.FloatProperty(name="Pocienienie", default=0.35, min=0.0, max=0.9, subtype='FACTOR')
+    decay_seg: bpy.props.FloatProperty(name="Gestosc petli", default=0.04, min=0.005, unit='LENGTH',
+                                       description="Odstep dodatkowych petli w strefie efektu (wiecej = gladsza "
+                                                   "krawedz, wiecej poligonow)")
+    decay_material: bpy.props.BoolProperty(name="Material z efektem (kopia)", default=True,
+                                           description="Deski w obszarze dostaja kopie materialu z przyciemnieniem "
+                                                       "wg atrybutu; oryginalny material bez zmian")
 
 
-class DESKI_PT_details(bpy.types.Panel):
-    bl_label = "Detale desek"
-    bl_idname = "DESKI_PT_details"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Deski"
-    bl_order = 2
-
-    def draw(self, context):
-        p = context.scene.deski_detale
-        col = self.layout.column()
-        col.prop(p, "boards"); col.prop(p, "seed")
-        for flag, props in (("use_jitter", ("jitter_lift", "jitter_tilt", "jitter_shift")),
-                            ("use_splinters", ("splinter_chance", "splinter_depth", "splinter_teeth_min",
-                                               "splinter_teeth_max", "splinter_out")),
-                            ("use_twist_nailed", ("twist_nailed",)),
-                            ("use_warp", ("warp_bow", "warp_twist", "warp_loops")),
-                            ("use_crack", ("crack_chance", "crack_min_length", "crack_angle", "crack_jag")),
-                            ("use_nails", ("nail_chance", "nail_length", "nail_diameter", "nail_head", "nail_tilt"))):
-            box = col.box(); box.prop(p, flag)
-            sub = box.column(); sub.enabled = getattr(p, flag)
-            for n in props:
-                sub.prop(p, n)
-        col.separator()
-        col.operator(DESKI_OT_details.bl_idname, icon='MOD_NOISE')
+from .wyrwanie import add_live_updates
+add_live_updates(DeskiDetailSettings, skip=("boards",))
 
 
-classes = (DeskiDetailSettings, DESKI_OT_details, DESKI_PT_details)
+classes = (DeskiDetailSettings, DESKI_OT_details)
 
 
 def register():

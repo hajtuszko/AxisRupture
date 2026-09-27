@@ -68,6 +68,11 @@ def canon(nodes, ds):
 
 
 # ---------------------------------------------------------------- deska
+def board_sig(o):
+    """podpis deski do pamieci szkicu: polozenie i liczba wierzcholkow"""
+    return (tuple(round(x, 6) for r in o.matrix_world for x in r), len(o.data.vertices), o.data.name)
+
+
 class Board:
     def __init__(self, o):
         self.o = o
@@ -127,6 +132,12 @@ class Board:
         self.sg = [-self.L / 2 + self.L * j / (ns - 1) for j in range(ns)]
         self.wg = [-self.W / 2, -self.W / 4, 0.0, self.W / 4, self.W / 2]
 
+    def reset(self):
+        """stan jak po utworzeniu (uklad deski i gwozdzie zostaja)"""
+        self.shift = Vector(); self.phase = 0; self.nodes = None; self.kinks = []; self.poly = None; self.roll = None
+        for a in ("released", "floor", "side", "H"):
+            self.__dict__.pop(a, None)
+
     def rest_nodes(self):
         return [(s, 0.0) for s in self.sk]
 
@@ -155,19 +166,18 @@ class Board:
         return self.F @ Vector((q.x, y, q.y - self.T / 2)) + self.shift
 
 
-# ---------------------------------------------------------------- operator
-class DESKI_OT_deform(bpy.types.Operator):
-    bl_idname = "object.deski_teren_deform"
-    bl_label = "Wyrwij deski terenem"
-    bl_description = ("Wygina i wyrywa deski z kolekcji tak, jak zrobilby to teren wypychajacy "
-                      "je od spodu do swojej obecnej (docelowej) pozycji")
-    bl_options = {'REGISTER', 'UNDO'}
+# ---------------------------------------------------------------- rdzen (bez operatora - wolany tez z podgladu na zywo)
+class Settings:
+    """ustawienia z nadpisaniami (np. jakosc podgladu): Settings(p, bevel_segments=2).bevel_segments"""
+    def __init__(self, p, **over):
+        self.__dict__["_p"] = p; self.__dict__["_o"] = over
 
-    @classmethod
-    def poll(cls, context):
-        p = context.scene.deski_teren
-        return p.terrain is not None and p.boards is not None
+    def __getattr__(self, k):
+        o = self.__dict__["_o"]
+        return o[k] if k in o else getattr(self.__dict__["_p"], k)
 
+
+class DeformCore:
     # --- teren
     def terrain_bvh(self, context, terrain):
         dg = context.evaluated_depsgraph_get()
@@ -182,7 +192,7 @@ class DESKI_OT_deform(bpy.types.Operator):
 
     def th(self, x, y):
         hit = self.TB.ray_cast(Vector((x, y, self.ttop + 1.0)), Vector((0, 0, -1)))
-        return hit[0].z if hit[0] else -1e9
+        return hit[0].z + getattr(self, "zoff", 0.0) if hit[0] else -1e9
 
     # --- symulacja jednej deski
     def simulate(self, b, p):
@@ -192,13 +202,20 @@ class DESKI_OT_deform(bpy.types.Operator):
         th_max = rnd.uniform(p.angle2_min, p.angle2_max)
         EPS, ds, kA, kB = p.clearance, b.ds, b.kA, b.kB
         a = b.sk[kB]
-        Hw = [[self.th(*(b.c + b.es * s + b.ew * w).xy) for w in b.wg] for s in b.sg]
+        hc = getattr(self, "h_cache", None)            # szkic: wysokosci terenu pod deska pamietane
+        Hw = hc.get(b.o.name) if hc is not None else None
+        if Hw is None:
+            Hw = [[self.th(*(b.c + b.es * s + b.ew * w).xy) for w in b.wg] for s in b.sg]
+            if hc is not None:
+                hc[b.o.name] = Hw
         H = [max(r) for r in Hw]
-        if max(H) <= b.z0:
+        if max(H) <= b.z0 and not getattr(self, "min_phase", {}).get(b.o.name):
             return False                                   # teren nie dochodzi do deski
         D = max(0.0, self.ttop - b.z0) + 0.01             # teren startuje ponizej deski
         phase, side, w_last = 1, 0, None
-        for t in range(p.steps + 1):
+        # kroki, zanim teren w ogole dosiegnie spodu deski, niczego nie zmieniaja - pomin je
+        t_first = max(0, int(p.steps * (1 - (max(H) - b.z0) / D)) - 1) if D > 0 else 0
+        for t in range(t_first, p.steps + 1):
             dz = -D * (1 - t / p.steps)
             g = [(s, max(h + dz - b.z0 + EPS, 0.0)) for s, h in zip(b.sg, H)]
             if phase == 1:
@@ -237,6 +254,9 @@ class DESKI_OT_deform(bpy.types.Operator):
                 if ang > th_max or under > EPS:
                     phase = 3
                     break
+        mp = getattr(self, "min_phase", {}).get(b.o.name)
+        if mp and mp[0] > phase:
+            phase, side = mp
         # przeszkody (teren/podloga) nad spodem deski w spoczynku, dla kazdego w w poprzek
         gfw = [[max(h - b.z0 + EPS, 0.0) for h in r] for r in Hw]
         wg = b.wg
@@ -258,7 +278,7 @@ class DESKI_OT_deform(bpy.types.Operator):
                 return 0.0
             lim = math.tan(psi_max)
             lo, hi = -lim, lim
-            for _ in range(60):                       # funkcja wypukla -> szukanie trojdzielne
+            for _ in range(32):                       # funkcja wypukla -> szukanie trojdzielne (dokladnosc ~1e-5)
                 m1, m2 = lo + (hi - lo) / 3, hi - (hi - lo) / 3
                 f1 = max(g - w * m1 for g, w in zip(gw, wg))
                 f2 = max(g - w * m2 for g, w in zip(gw, wg))
@@ -343,7 +363,20 @@ class DESKI_OT_deform(bpy.types.Operator):
 
         L2 = b.L / 2
         kinks = []                                     # (s spoczynkowe, kat zalamania, promien bevela)
-        if phase == 2:
+        rigid = b.L < getattr(p, "bend_min_length", 0.0)
+        if rigid and phase == 1:
+            phase = 3                                  # krotka deska sie nie wygina - gwozdzie puszczaja, lezy na terenie
+        if rigid and phase == 2:
+            # krotka deska: sztywny obrot wokol konca po stronie trzymajacego gwozdzia (bez zgiecia)
+            s_p = -L2 if side == 1 else L2
+            samples = [(side * (s - s_p), max(gw)) for s, gw in zip(b.sg, gfw) if side * (s - s_p) > 1e-6]
+            th = 0.0
+            for d_, g_ in samples:
+                th = max(th, math.atan2(g_, d_))
+            th = min(th, math.radians(80))
+            nodes = [(s_p + side * abs(s - s_p) * math.cos(th), abs(s - s_p) * math.sin(th)) for s in b.sk]
+            poly = None
+        elif phase == 2:
             # najwieksze naprezenie przy trzymajacym gwozdziu: tam petla, dalej sztywna prosta
             kH = kA if side == 1 else kB
             sH = b.sk[kH]
@@ -359,7 +392,7 @@ class DESKI_OT_deform(bpy.types.Operator):
             if th > 1e-4:
                 kinks.append((sH, th, bw))
             nodes = poly_nodes(poly)
-        elif phase == 3:
+        if phase == 3:
             # wyrwana: prosta, sztywna deska oparta o teren pod swoim srodkiem (przechylona w poprzek)
             def rest_line(psi):
                 gf = [(s, g_eff(gw, psi)) for s, gw in zip(b.sg, gfw)]
@@ -377,7 +410,7 @@ class DESKI_OT_deform(bpy.types.Operator):
             nodes = [((k - N / 2) * ds * math.cos(phi), z_c + (k - N / 2) * ds * math.sin(phi))
                      for k in range(N + 1)]
             roll = [psi_c] * (N + 1)
-        else:
+        elif phase == 1:
             # przybita na obu gwozdziach: petle przy gwozdziach i na wierzcholku nad terenem
             smp = [(s, gfw[j]) for j, s in enumerate(b.sg) if -a < s < a]
             tA = max([math.atan2(max(gw), s + a) for s, gw in smp] + [0.0])
@@ -416,7 +449,7 @@ class DESKI_OT_deform(bpy.types.Operator):
                 kinks = [kk for kk in kinks if kk[1] > 1e-4]
             nodes = poly_nodes(poly)
         b.kinks = kinks
-        b.poly = poly if phase in (1, 2) else None
+        b.poly = poly if phase in (1, 2) and not (rigid and phase == 2) else None
         b.roll = roll
         b.nodes = canon(nodes, ds)
         b.phase = phase
@@ -425,12 +458,17 @@ class DESKI_OT_deform(bpy.types.Operator):
         return True
 
     def lift(self, b, EPS):
-        """podniesienie w pionie, zeby deska nie wchodzila w teren ani w podloge"""
+        """podniesienie w pionie, zeby deska nie wchodzila w teren ani w podloge (albo w dno / sciane dziury)"""
         lift = 0.0
+        F = getattr(self, "F", None)
+        void = F is not None and F.mode in ('ZAPADNIECIE', 'WYBUCH')
         for k in range(b.N + 1):
             for w in (-b.W / 2, -b.W / 4, 0.0, b.W / 4, b.W / 2):
                 q = b.node_point(k, w)
-                lift = max(lift, self.th(q.x, q.y) + EPS - q.z, b.z0 - q.z)
+                if void:
+                    lift = max(lift, b.z0 + F.sup_rel(q.x, q.y) - q.z)
+                else:
+                    lift = max(lift, self.th(q.x, q.y) + EPS - q.z, b.z0 - q.z)
         return lift
 
     def end_extent(self, b, axis):
@@ -495,7 +533,7 @@ class DESKI_OT_deform(bpy.types.Operator):
         stops = sorted([-b.L / 2, b.L / 2] + [k[0] for k in b.kinks])
         for (s_k, ang, width), (geom, _a, _w) in zip(b.kinks, loops):
             edges = [g for g in geom if isinstance(g, bmesh.types.BMEdge) and g.is_valid]
-            if not edges or ang < 1e-4:
+            if not edges or abs(ang) < 1e-4:
                 continue
             gap = min(abs(s_k - t) for t in stops if abs(s_k - t) > 1e-6)
             off = min(width, 0.45 * gap)
@@ -519,6 +557,71 @@ class DESKI_OT_deform(bpy.types.Operator):
         bm.to_mesh(o.data); bm.free(); o.data.update()
         o.matrix_world = new_mw
         return "wygieta"
+
+    # --- kolizje deska-deska: pary z glebokoscia przenikania (m)
+    def collisions(self, context, objs, changed, thr=0.002):
+        dg = context.evaluated_depsgraph_get()
+        geo = {}
+        for o in objs:
+            oe = o.evaluated_get(dg); me = oe.to_mesh()
+            vs = [oe.matrix_world @ v.co for v in me.vertices]
+            geo[o.name] = (vs, BVHTree.FromPolygons(vs, [tuple(q.vertices) for q in me.polygons]))
+            oe.to_mesh_clear()
+        dirs = [Vector((0.31, 0.17, 1)).normalized(), Vector((-0.23, 0.41, -1)).normalized(),
+                Vector((1, -0.37, 0.13)).normalized()]
+
+        def inside(v, bvh):
+            votes = 0
+            for d in dirs:
+                n, o_ = 0, v.copy()
+                while n < 50:
+                    hit = bvh.ray_cast(o_, d)
+                    if hit[0] is None:
+                        break
+                    n += 1; o_ = hit[0] + d * 1e-6
+                votes += n % 2
+            return votes >= 2
+
+        def depth(vs, bvh):
+            dd = 0.0
+            for v in vs:
+                r = bvh.find_nearest(v, 0.3)
+                if r[0] is not None and r[3] > dd and inside(v, bvh):
+                    dd = r[3]
+            return dd
+        out = []
+        names = [o.name for o in objs]
+        for i_, a_ in enumerate(names):
+            for b_ in names[i_ + 1:]:
+                if a_ not in changed and b_ not in changed:
+                    continue
+                if geo[a_][1].overlap(geo[b_][1]):
+                    d = max(depth(geo[a_][0], geo[b_][1]), depth(geo[b_][0], geo[a_][1]))
+                    if d > thr:
+                        out.append((a_, b_, d))
+        return out
+
+    def settle(self, context, boards, moved, rounds=16):
+        """rozsuniecie kolizji: swobodniejsza deska (mniej trzymajacych gwozdzi) podnoszona o glebokosc"""
+        objs = [b.o for b in boards if b.phase != 4]
+        rank = {b.o.name: b.phase for b in boards}
+        changed = {b.o.name for b in moved}
+        byname = {o.name: o for o in objs}
+        lifted = 0
+        for _ in range(rounds):
+            context.view_layer.update()
+            pairs = self.collisions(context, objs, changed)
+            if not pairs:
+                break
+            done = set()
+            for a_, b_, d in sorted(pairs, key=lambda t: -t[2]):
+                mv = a_ if rank.get(a_, 0) >= rank.get(b_, 0) else b_
+                if rank.get(mv, 0) == 0 or mv in done:
+                    continue
+                o = byname[mv]
+                o.matrix_world = Matrix.Translation((0, 0, d + 0.0015)) @ o.matrix_world
+                done.add(mv); lifted += 1
+        return lifted
 
     # --- kontrola wyniku
     def verify(self, context, boards, changed):
@@ -563,7 +666,7 @@ class DESKI_OT_deform(bpy.types.Operator):
                     if d > 0.002:
                         bad += 1
         tbad = 0
-        for n in changed:
+        for n in (changed if self.TB is not None else ()):
             for v in geo[n][0]:
                 if self.th(v.x, v.y) - v.z > 0.002:
                     # wierzcholek pod powierzchnia terenu - policz tylko wyrazne przypadki
@@ -572,34 +675,77 @@ class DESKI_OT_deform(bpy.types.Operator):
                         tbad += 1; break
         return bad, worst, tbad
 
-    def execute(self, context):
-        p = context.scene.deski_teren
+    def solve(self, context, p, boards_in=None):
+        """stany desek (bez zmiany obiektow): (boards, moved, thrown, skipped) albo (None, poziom, komunikat)"""
+        self.moved = []
         terrain, coll = p.terrain, p.boards
-        self.terrain_bvh(context, terrain)
+        scen = getattr(p, "scenario", 'TEREN')
+        self.F = None
+        if scen == 'TEREN':
+            if not (getattr(self, "keep_tb", False) and getattr(self, "TB", None) is not None):
+                self.terrain_bvh(context, terrain)
+        elif p.emitter is None:
+            return 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
         boards, skipped = [], []
-        for o in coll.all_objects:
-            if o.type != 'MESH' or o == terrain or not o.data.vertices:
+        for o in (boards_in if boards_in is not None else coll.all_objects):
+            if o.type != 'MESH' or o == terrain or o == p.emitter or not o.data.vertices:
                 continue
             if o.data.shape_keys:
-                skipped.append(o.name + " (shape keys)"); continue
-            b = Board(o)
-            if not b.flat or b.T < 1e-4:
-                skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
-            b.setup(p.segment_length, p.nail_position)
+                skipped.append(o.name + " (shape keys / animacja)"); continue
+            bc = getattr(self, "board_cache", None)    # szkic: deski sie nie zmieniaja - uklad liczony raz
+            b = bc.get(o.name) if bc is not None else None
+            if b is not None:
+                try:                                   # obiekt nadal ten sam? (cofniecie / usuniecie unieważnia)
+                    same = b.o == o and b.sig == board_sig(o)
+                except ReferenceError:
+                    same = False
+                if same:
+                    b.reset()
+                else:
+                    b = None
+            if b is None:
+                b = Board(o)
+                if not b.flat or b.T < 1e-4:
+                    skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
+                b.setup(p.segment_length, p.nail_position)
+                if bc is not None:
+                    b.sig = board_sig(o)
+                    bc[o.name] = b
             boards.append(b)
         if not boards:
-            self.report({'ERROR'}, "Brak desek do przetworzenia"); return {'CANCELLED'}
-        moved = [b for b in boards if self.simulate(b, p)]
+            return None, 'ERROR', "Brak desek do przetworzenia"
+        if scen != 'TEREN':
+            from . import scenariusze
+            z0s = sorted(b.z0 for b in boards)
+            self.F = scenariusze.Field(p, z0s[len(z0s) // 2])
+            self.TB = None
+            self.th = self.F.th; self.ttop = self.F.ttop; self.tbot = self.F.tbot
+        if scen in ('TEREN', 'WILGOC'):
+            moved = [b for b in boards if self.simulate(b, p)]
+        else:
+            moved = [b for b in boards if scenariusze.simulate_void(self, b, p, self.F)]
+        self.moved = [b.o for b in moved]
         if not moved:
-            self.report({'WARNING'}, "Teren nie dochodzi do zadnej deski"); return {'CANCELLED'}
+            return None, 'WARNING', ("Teren nie dochodzi do zadnej deski" if scen == 'TEREN' else
+                                     "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)")
         EPS = self._eps = p.clearance
+        thrown = [b for b in moved if b.phase == 4]
+        moved = [b for b in moved if b.phase != 4]
         for b in moved:
             if b.phase >= 2:
                 b.shift = Vector((0, 0, self.lift(b, EPS)))
         # deski stykajace sie koncami: rozsun wzdluz dlugosci
         pairs = []
-        for a_ in boards:
-            for b_ in boards:
+        live = [b for b in boards if b.phase != 4]
+        # tylko sasiedzi z siatki przestrzennej (zamiast wszystkich par - przy setkach desek to sekundy)
+        cell = max(b.L for b in live) + 0.05 if live else 1.0
+        grid = {}
+        for b_ in live:
+            grid.setdefault((int(b_.c.x // cell), int(b_.c.y // cell)), []).append(b_)
+        for a_ in live:
+            ax, ay = int(a_.c.x // cell), int(a_.c.y // cell)
+            near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for q in grid.get((ax + dx, ay + dy), ())]
+            for b_ in near:
                 if a_ is b_ or (a_.nodes is None and b_.nodes is None):
                     continue
                 if abs(a_.es.dot(b_.es)) < 0.995:
@@ -627,16 +773,22 @@ class DESKI_OT_deform(bpy.types.Operator):
         for b in moved:
             if b.phase >= 2:
                 b.shift += Vector((0, 0, self.lift(b, EPS)))
+        return boards, moved, thrown, skipped
+
+    def run(self, context, p, remove_rigidbody=True):
+        """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
+        res = self.solve(context, p)
+        if res[0] is None:
+            return res[1], res[2]
+        boards, moved, thrown, skipped = res
+        scen = getattr(p, "scenario", 'TEREN')
+        coll = p.boards
+        EPS = p.clearance
+        if scen in ('ZAPADNIECIE', 'WYBUCH'):
+            from . import scenariusze
         # usun Rigid Body (inaczej symulacja nadpisze ulozenie)
-        if p.remove_rigidbody:
-            vl = context.view_layer; prev = vl.objects.active
-            for b in boards:
-                if b.o.rigid_body and b.o.name in vl.objects:
-                    hs = b.o.hide_get(); b.o.hide_set(False)
-                    vl.objects.active = b.o
-                    bpy.ops.rigidbody.object_remove()
-                    b.o.hide_set(hs)
-            vl.objects.active = prev
+        if p.remove_rigidbody and remove_rigidbody:
+            remove_rigid_bodies(context, [b.o for b in boards])
         stats = {"prosta": 0, "wygieta": 0}
         for b in moved:
             # gwozdzie (dla modulu Detale): gora i spod deski w miejscu gwozdzia + czy puscil
@@ -660,27 +812,113 @@ class DESKI_OT_deform(bpy.types.Operator):
                 data += list(inv @ top) + list(inv @ bot) + [1.0 if rel else 0.0]
             b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
             b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
-            b.o["deski_podloga"] = b.z0                 # poziom podlogi (swiat)
+            b.o["deski_podloga"] = getattr(b, "floor", b.z0)   # najnizsze podparcie pod deska (swiat)
+        n_settle = 0
+        if getattr(p, "resolve_collisions", False):
+            n_settle = self.settle(context, boards, moved)
+        if scen in ('ZAPADNIECIE', 'WYBUCH') and p.make_ground:
+            scenariusze.build_ground(context, p, self.F, coll)
+        for b in thrown:                                # wyrzucone podmuchem: ukryte (do animacji / gruzu)
+            b.o.hide_set(True); b.o.hide_render = True
+            b.o["deski_faza"] = "wyrzucona"
         msg = (f"Deski: {len(moved)} ruszone (proste: {stats['prosta']}, wygiete: {stats['wygieta']}), "
-               f"nietkniete: {len(boards) - len(moved)}")
+               f"nietkniete: {len(boards) - len(moved) - len(thrown)}")
+        if thrown:
+            msg += f", wyrzucone (ukryte): {len(thrown)}"
+        if n_settle:
+            msg += f", podniesione (kolizje): {n_settle}"
         if skipped:
             msg += f", pominiete: {len(skipped)}"
         if p.verify:
             context.view_layer.update()
             bad, worst, tbad = self.verify(context, boards, {b.o.name for b in moved})
             msg += f" | kontrola: przenikania deska-deska >2mm: {bad} (max {worst * 1000:.1f} mm), w terenie: {tbad}"
-        self.report({'WARNING'} if (skipped or (p.verify and (bad or tbad))) else {'INFO'}, msg)
         for s in skipped:
             print("Deski - pominieta:", s)
-        return {'FINISHED'}
+        return ('WARNING' if (skipped or (p.verify and (bad or tbad))) else 'INFO'), msg
+
+
+def remove_rigid_bodies(context, objs):
+    """usun Rigid Body (inaczej symulacja nadpisze ulozenie); dziala tez poza operatorem"""
+    vl = context.view_layer
+    for o in objs:
+        if o.rigid_body and o.name in vl.objects:
+            hs = o.hide_get(); o.hide_set(False)
+            with context.temp_override(object=o, active_object=o, selected_objects=[o]):
+                bpy.ops.rigidbody.object_remove()
+            o.hide_set(hs)
+
+
+class DESKI_OT_deform(DeformCore, bpy.types.Operator):
+    bl_idname = "object.deski_teren_deform"
+    bl_label = "Wyrwij deski terenem"
+    bl_description = ("Wygina i wyrywa deski z kolekcji tak, jak zrobilby to teren wypychajacy "
+                      "je od spodu do swojej obecnej (docelowej) pozycji")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.deski_teren
+        pg = getattr(context.scene, "deski_podglad", None)
+        src = p.terrain if p.scenario == 'TEREN' else p.emitter
+        return src is not None and p.boards is not None and not (pg and pg.active)
+
+    def execute(self, context):
+        lvl, msg = self.run(context, context.scene.deski_teren)
+        self.report({lvl}, msg)
+        return {'CANCELLED'} if lvl == 'ERROR' or not self.moved else {'FINISHED'}
 
 
 # ---------------------------------------------------------------- ustawienia + panel
+
+def _live(self, context):
+    from . import podglad
+    podglad.live_update(self, context)
+
+
+def add_live_updates(cls, skip=()):
+    """kazda zmiana ustawienia -> przeliczenie podgladu na zywo (jesli wlaczony)"""
+    ann = cls.__annotations__
+    for k, d in list(ann.items()):
+        if k in skip or not hasattr(d, "keywords") or "update" in d.keywords:
+            continue
+        ann[k] = d.function(**dict(d.keywords, update=_live))
+
+
 def mesh_poll(self, o):
     return o.type == 'MESH'
 
 
 class DeskiSettings(bpy.types.PropertyGroup):
+    scenario: bpy.props.EnumProperty(name="Scenariusz", default='TEREN', items=(
+        ('TEREN', "Teren", "Teren w pozycji docelowej wypycha deski od spodu", 'MESH_GRID', 0),
+        ('WILGOC', "Wilgoć", "Wybrzuszenie od wilgoci: kopula / grzbiet pod deskami (Empty: srodek i promien, "
+                             "skala niejednorodna = elipsa / grzbiet)", 'MOD_FLUIDSIM', 1),
+        ('ZAPADNIECIE', "Zapadnięcie", "Dziura w podlodze: deski zwisaja z krawedzi albo wpadaja do srodka",
+         'SORT_DESC', 2),
+        ('WYBUCH', "Wybuch", "Krater i podmuch: deski odgiete w gore, najblizsze srodka wyrzucone", 'FORCE_FORCE', 3)))
+    emitter: bpy.props.PointerProperty(name="Obszar", type=bpy.types.Object,
+                                       description="Empty (srodek, promien = rozmiar Empty) albo siatka (obrys); "
+                                                   "przesuwanie / skalowanie widac od razu w Podgladzie na zywo")
+    bulge_height: bpy.props.FloatProperty(name="Wysokosc wybrzuszenia", default=0.08, min=0.0, unit='LENGTH')
+    hole_depth: bpy.props.FloatProperty(name="Glebokosc", default=0.35, min=0.0, unit='LENGTH',
+                                        description="Glebokosc dziury / krateru pod podloga")
+    hang_max: bpy.props.FloatProperty(name="Maks. zwis (st.)", default=65.0, min=0.0, max=89.0,
+                                      description="Najwiekszy kat, o jaki deska zlamana na krawedzi opada w dziure")
+    crater_size: bpy.props.FloatProperty(name="Krater (czesc promienia)", default=0.45, min=0.0, max=1.0,
+                                         subtype='FACTOR')
+    blast_strength: bpy.props.FloatProperty(name="Sila podmuchu", default=1.0, min=0.0, max=3.0)
+    peel_max: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=70.0, min=0.0, max=89.0)
+    throw_zone: bpy.props.FloatProperty(name="Strefa wyrzucenia", default=0.3, min=0.0, max=1.0, subtype='FACTOR',
+                                        description="Deski, na ktore podmuch dziala silniej niz (1 - to), sa wyrzucone (ukryte)")
+    anim_step: bpy.props.IntProperty(name="Co ile klatek", default=2, min=1, max=20,
+                                     description="Probkowanie symulacji w czasie (pomiedzy - interpolacja liniowa)")
+    anim_loops: bpy.props.IntProperty(name="Petle animacji", default=4, min=0, max=16,
+                                      description="Dodatkowe rownomierne petle w deskach wyginanych w animacji "
+                                                  "(luk przesuwajacy sie po desce potrzebuje geometrii)")
+    make_ground: bpy.props.BoolProperty(name="Utworz dno dziury / krateru", default=True,
+                                        description="Siatka dna (ten sam ksztalt, o ktory opieraja sie deski) - obiekt "
+                                                    "'<kolekcja> - dno', podmieniany przy kazdym przeliczeniu")
     terrain: bpy.props.PointerProperty(name="Teren", type=bpy.types.Object, poll=mesh_poll,
                                        description="Teren w pozycji docelowej (wypycha deski od spodu)")
     boards: bpy.props.PointerProperty(name="Deski", type=bpy.types.Collection,
@@ -713,35 +951,19 @@ class DeskiSettings(bpy.types.PropertyGroup):
     straight_tolerance: bpy.props.FloatProperty(name="Prosta ponizej (st.)", default=0.2, min=0.0,
                                                 description="Deska wygieta mniej niz tyle stopni zostaje nietknieta siatkowo")
     remove_rigidbody: bpy.props.BoolProperty(name="Usun Rigid Body z desek", default=True)
+    resolve_collisions: bpy.props.BoolProperty(name="Rozsun kolizje", default=True,
+                                               description="Deski przenikajace sie po wyginaniu: swobodniejsza (mniej "
+                                                           "trzymajacych gwozdzi) jest podnoszona o glebokosc przenikania")
     verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
+    bend_min_length: bpy.props.FloatProperty(name="Min. dlugosc do giecia", default=0.6, min=0.0, unit='LENGTH',
+                                             description="Deski krotsze (np. klepki jodelki) sa sztywne: teren je podnosi "
+                                                         "i przechyla w calosci, bez wyginania i bez odksztalcen w Detalach")
 
 
-class DESKI_PT_panel(bpy.types.Panel):
-    bl_label = "Wyrwanie desek"
-    bl_idname = "DESKI_PT_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Deski"
-    bl_order = 1
-
-    def draw(self, context):
-        p = context.scene.deski_teren
-        col = self.layout.column()
-        col.prop(p, "terrain"); col.prop(p, "boards")
-        col.separator()
-        col.prop(p, "seed"); col.prop(p, "nail_position")
-        box = col.box(); box.label(text="Progi zerwania gwozdzi")
-        r = box.row(align=True); r.prop(p, "bulge_min"); r.prop(p, "bulge_max")
-        r = box.row(align=True); r.prop(p, "slope_min"); r.prop(p, "slope_max")
-        r = box.row(align=True); r.prop(p, "angle2_min"); r.prop(p, "angle2_max")
-        box = col.box(); box.label(text="Dokladnosc")
-        box.prop(p, "segment_length"); box.prop(p, "bevel_width"); box.prop(p, "bevel_segments"); box.prop(p, "roll_max"); box.prop(p, "smooth_shading"); box.prop(p, "steps"); box.prop(p, "clearance")
-        col.prop(p, "remove_rigidbody"); col.prop(p, "verify")
-        col.separator()
-        col.operator(DESKI_OT_deform.bl_idname, icon='MOD_SIMPLEDEFORM')
+add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))
 
 
-classes = (DeskiSettings, DESKI_OT_deform, DESKI_PT_panel)
+classes = (DeskiSettings, DESKI_OT_deform)
 
 
 def register():

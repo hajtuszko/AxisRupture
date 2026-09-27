@@ -82,7 +82,20 @@ def _normal_valley(px, sigmas):
     return outs
 
 
+def run(gen):
+    """wykonaj generator do konca i zwroc jego wynik (wersja bez paska postepu)"""
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        return e.value
+
+
 def seam_map(img, res=1024):
+    return run(seam_map_iter(img, res))
+
+
+def seam_map_iter(img, res=1024):
     """Laczona mapa szczelin: kazda mapa materialu zamieniona na miare 'doliny' w srodku szczeliny
     (AO/Cavity/Specular/Gloss/wysokosc/kolor - ciemniej/nizej, Roughness - jasniej, Normal - wklesla
     krzywizna), wieloskalowo, odpornie znormalizowana i usredniona. Szczelina = jeden ostry grzbiet
@@ -98,7 +111,9 @@ def seam_map(img, res=1024):
         return np.minimum(np.clip((a - med) / (1.4826 * mad), 0, None), 8.0)
 
     normal_px = None
-    for key, path in maps.items():
+    n_maps = len(maps)
+    for i_map, (key, path) in enumerate(maps.items()):
+        yield (i_map / n_maps, f"mapa {i_map + 1}/{n_maps}: {key}")
         try:
             im = bpy.data.images.load(path, check_existing=True)
         except RuntimeError:
@@ -117,6 +132,7 @@ def seam_map(img, res=1024):
             continue
         used.append(key)
     if normal_px is not None:
+        yield (0.95, "mapa normalnych")
         a, b = _normal_valley(normal_px, sig)
         if ev:                                                # konwencja Y: zgodna z pozostalymi mapami
             ref = np.average(ev, 0, weights=wts)
@@ -281,13 +297,19 @@ def _var_xy(I, J, var):
 
 
 def fit(E1, E2, origin, k, n_user=0, var_user=None, off_user=None):
+    return run(fit_iter(E1, E2, origin, k, n_user, var_user, off_user))
+
+
+def fit_iter(E1, E2, origin, k, n_user=0, var_user=None, off_user=None):
     """najlepsza siec jodelki: (wynik, n, (cx, cy), wariant)"""
     import numpy as np
     i0, j0 = origin
     I, J = np.meshgrid(np.arange(E1.shape[0]) + i0, np.arange(E1.shape[1]) + j0, indexing='ij')
     best = None
     ns = [n_user] if n_user else range(k + 2, 12 * k + 1)
-    for var in ([var_user] if var_user else VARIANTS):
+    vs = [var_user] if var_user else VARIANTS
+    for i_var, var in enumerate(vs):
+        yield (i_var / len(vs), f"dopasowanie wzoru {i_var + 1}/{len(vs)}")
         X, Y = _var_xy(I, J, var)
         for n in ns:
             offs = [off_user] if off_user else [(cx, cy) for cx in range(2 * n) for cy in range(2 * k)]
@@ -346,6 +368,31 @@ def cell_quad(lat, size, i0, i1, j0, j1, shrink, field=None):
         pts.append((float(P[0] / w), float(P[1] / h)))
     area = sum(pts[q - 1][0] * pts[q][1] - pts[q][0] * pts[q - 1][1] for q in range(4))
     return pts if area > 0 else pts[::-1]
+
+
+def cell_poly(lat, size, i0, i1, j0, j1, shrink, field=None, raw=False):
+    """obrys deski (CCW, UV) z punktem w kazdym wezle siatki na bokach; kazdy punkt przesuniety tym samym
+    polem korekty -> sasiednie deski maja wspolna (odsunieta o szczeline) linie szczeliny, bez nachodzenia"""
+    import numpy as np
+    N1, N2, u, p1, p2, k = lat
+    w, h = size
+    Minv = np.linalg.inv(np.array([N1, N2]))
+    a0, a1, b0, b1 = i0 + shrink, i1 - shrink, j0 + shrink, j1 - shrink
+
+    def ticks(lo, hi, c0, c1):
+        inner = [float(t) for t in range(c0 + 1, c1)]
+        return [lo] + inner + [hi]
+    ta = ticks(a0, a1, i0, i1); tb = ticks(b0, b1, j0, j1)
+    pts = [(a, b0) for a in ta] + [(a1, b) for b in tb[1:]] + [(a, b1) for a in ta[-2::-1]] + [(a0, b) for b in tb[-2:0:-1]]
+    A = np.array([p1 + a * u for a, _ in pts]); B = np.array([p2 + b * u for _, b in pts])
+    X = Minv[0, 0] * A + Minv[0, 1] * B; Y = Minv[1, 0] * A + Minv[1, 1] * B
+    if field is not None:
+        Dp = field_at(field, X, Y); X = X + Dp[0]; Y = Y + Dp[1]
+    out = [(float(x / w), float(y / h)) for x, y in zip(X, Y)]
+    if raw:
+        return out, len(ta), len(tb)
+    area = sum(out[q - 1][0] * out[q][1] - out[q][0] * out[q - 1][1] for q in range(len(out)))
+    return out if area > 0 else out[::-1]
 
 
 def along_uv(lat, size, i0, i1, j0, j1, field=None):
