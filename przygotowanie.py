@@ -100,10 +100,13 @@ def detect_planks(lum, sens=4.0, min_width=0.015, min_length=0.05, cover=0.6, co
         return axis, seams, []
     # kontrast szczeliny: o ile szczelina jest ciemniejsza od drewna obok -> prog dla laczen
     contr = []
+    # "drewno obok" szczeliny: 20% szerokosci elementu (stale 8 px bylo wciaz w szczelinie przy duzej mapie)
+    gaps_px = [((seams[(i + 1) % len(seams)] - a) % 1.0) * n_across for i, a in enumerate(seams)]
+    dd = max(8, int(0.2 * min(gaps_px)))
     for s in seams:
         x = int(round(s * n_across))
         line = np.min([L[:, (x + d) % n_across] for d in (-1, 0, 1)], axis=0)
-        side = np.median([L[:, (x + d) % n_across] for d in (-8, -6, 6, 8)], axis=0)
+        side = np.median([L[:, (x + d) % n_across] for d in (-dd, -(3 * dd) // 4, (3 * dd) // 4, dd)], axis=0)
         contr.append(float(np.median(side - line)))
     thr = contrast * float(np.median(contr))
     bands = []
@@ -941,8 +944,9 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         if len(bm.faces) > 1:
             bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(1), verts=bm.verts[:], edges=bm.edges[:],
                                      delimit={'UV', 'MATERIAL'})
+        ref = src_normal(src)                          # normalna plaszczyzny (podloga, sciana, dach)
         for f in bm.faces:
-            if f.normal.z < 0:
+            if f.normal.dot(ref) < 0:
                 f.normal_flip()
         # n-gony (deska przycieta skosnie brzegiem plaszczyzny) -> czworokaty + trojkat
         ngons = [f for f in bm.faces if len(f.verts) > 4]
@@ -986,7 +990,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
             tset = set(tops)
             fix_side_uvs(bm, uvl, to_frame, tops, [f for f in bm.faces if f not in tset])
         bm.faces.ensure_lookup_table()
-        dm = bpy.data.meshes.new(f"{src.name}_Deska")
+        dm = bpy.data.meshes.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Deska')}")
         bm.to_mesh(dm); bm.free()
         for mat in mats:
             dm.materials.append(mat)
@@ -996,7 +1000,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         vs = [v.co for v in dm.vertices]
         c = Vector([(min(v[k] for v in vs) + max(v[k] for v in vs)) / 2 for k in range(3)])
         dm.transform(Matrix.Translation(-c))
-        ob = bpy.data.objects.new(f"{src.name}_Deska_{idx:03d}", dm)
+        ob = bpy.data.objects.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Deska')}_{idx:03d}", dm)
         ob.matrix_world = mw @ R.to_4x4() @ Matrix.Translation(c)
         out.objects.link(ob)
         return ob, R @ c
@@ -1034,11 +1038,55 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
 
 
 # ---------------------------------------------------------------- ustawienia + panel
+PIECE = {"DESKI": "Deska", "PLYTKI": "Plytka", "CEGLY": "Cegla", "DACHOWKI": "Dachowka", "KOSTKA": "Kostka",
+         "LOD": "Kra"}
+
+# presety powierzchni: grubosc, fuga, faza, gwozdzie, maks. dlugosc, min. dlugosc do giecia (etap 2)
+PRESETS = {
+    "DESKI":    dict(thickness=0.012, gap=0.001, chamfer=0.002, detect_nails=True, max_length=2.5),
+    "PLYTKI":   dict(thickness=0.008, gap=0.003, chamfer=0.001, detect_nails=False, max_length=0.0),
+    "CEGLY":    dict(thickness=0.06, gap=0.008, chamfer=0.004, detect_nails=False, max_length=0.0),
+    "DACHOWKI": dict(thickness=0.015, gap=0.002, chamfer=0.001, detect_nails=False, max_length=0.0),
+    "KOSTKA":   dict(thickness=0.06, gap=0.006, chamfer=0.008, detect_nails=False, max_length=0.0),
+}
+
+
+def _apply_preset(self, context):
+    for k, v in PRESETS.get(self.surface, {}).items():
+        setattr(self, k, v)
+
+
+def make_piece(src, out, polys, p, idx, along=None):
+    """element (deska / plytka / kra...) z wielokatow wierzchu - do uzycia z innych modulow"""
+    return DESKI_OT_split.make_board(None, src, out, polys, p, idx, along=along)
+
+
+_NRM = {}
+
+
+def src_normal(src):
+    """srednia normalna scian plaszczyzny zrodlowej (lokalnie) - kierunek 'na zewnatrz' elementow"""
+    key = (src.name, len(src.data.polygons), src.data.name)
+    if key not in _NRM:
+        n = Vector()
+        for poly in src.data.polygons:
+            n += poly.normal * poly.area
+        _NRM[key] = n.normalized() if n.length > 1e-12 else Vector((0, 0, 1))
+    return _NRM[key]
+
+
 def _plane_poll(self, o):
     return o.type == 'MESH' and len(o.data.uv_layers) > 0
 
 
 class DeskiPrepSettings(bpy.types.PropertyGroup):
+    surface: bpy.props.EnumProperty(name="Powierzchnia", default='DESKI', update=_apply_preset, items=(
+        ('DESKI', "Deski", "Deski / parkiet: przybite gwozdziami", 'MESH_PLANE', 0),
+        ('PLYTKI', "Płytki", "Plytki / kafle / kasetony: cienkie, szeroka fuga, bez gwozdzi", 'MESH_GRID', 1),
+        ('CEGLY', "Cegły", "Cegly / mur / panele: grube, fuga zaprawy", 'MOD_BUILD', 2),
+        ('DACHOWKI', "Dachówki", "Dachowki / gonty / pokrycie dachu", 'MOD_ARRAY', 3),
+        ('KOSTKA', "Kostka", "Kostka brukowa / plyty chodnikowe: grube, fazowane", 'SNAP_VOLUME', 4)),
+        description="Ustawia grubosc, fuge, faze i gwozdzie dla rodzaju powierzchni (mozna je potem zmienic)")
     source: bpy.props.PointerProperty(name="Płaszczyzna", type=bpy.types.Object, poll=_plane_poll,
                                       description="Płaszczyzna podłogi do podziału (siatka z UV i teksturą desek) - "
                                                   "wybierz z listy albo pipetą w widoku")

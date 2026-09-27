@@ -52,12 +52,14 @@ class DESKI_PT_prep(Panel):
         col.prop(p, "source", text="Płaszczyzna")
         col.prop(p, "texture", text="Tekstura")
         col.prop(p, "output_name", text="Wynik")
+        col.prop(p, "surface", text="Powierzchnia")
         L.row().prop(p, "layout", expand=True)
         L.separator()
         if pz.JOB["running"]:
             pz.draw_job(L, pz.DESKI_OT_split.bl_idname, 'MOD_EDGESPLIT')
             return
-        big(L, pz.DESKI_OT_split.bl_idname, "Podziel na deski", 'MOD_EDGESPLIT', enabled=p.source is not None)
+        big(L, pz.DESKI_OT_split.bl_idname, "Podziel na elementy" if p.surface != 'DESKI' else "Podziel na deski",
+            'MOD_EDGESPLIT', enabled=p.source is not None)
         if p.layout == 'HERRINGBONE':
             r = L.row(); r.enabled = p.source is not None
             r.operator(pz.DESKI_OT_split_preview.bl_idname, text="Podgląd podziału (obrysy)", icon='HIDE_OFF')
