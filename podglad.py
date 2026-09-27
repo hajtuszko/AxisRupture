@@ -10,6 +10,10 @@ from mathutils import Matrix
 
 SNAP = "deski_snap"
 _state = {"dirty": 0.0, "running": False, "last": 0.0}
+# szkic: wynik rysowany jako polprzezroczyste deski (nakladka GPU), prawdziwe siatki nietkniete
+_GH = {"core": None, "key": None, "sig": None, "tris": None, "lines": None, "hidden": set(), "meshes_dirty": False,
+       "handler": None}
+PHASE_COL = {1: (0.35, 0.85, 0.35, 0.40), 2: (1.0, 0.75, 0.15, 0.45), 3: (1.0, 0.30, 0.25, 0.50)}
 
 
 def _boards(coll):
@@ -92,6 +96,106 @@ def forget(coll):
                 bpy.data.meshes.remove(me)
 
 
+# ---------------------------------------------------------------- szkic
+def _field_sig(pw):
+    """podpis wszystkiego, od czego zalezy teren pod deskami - zmiana = przelicz wysokosci"""
+    def mw(o):
+        return tuple(round(x, 6) for r in o.matrix_world for x in r) if o else None
+    sig = (pw.scenario, mw(pw.terrain), mw(pw.emitter), pw.bulge_height, pw.hole_depth, pw.crater_size,
+           pw.blast_strength, bpy.context.scene.frame_current)
+    if pw.emitter is not None and pw.emitter.type == 'EMPTY':
+        sig += (pw.emitter.empty_display_size,)
+    return sig
+
+
+def _set_hidden(names):
+    for n in _GH["hidden"] - names:
+        o = bpy.data.objects.get(n)
+        if o and n in bpy.context.view_layer.objects:
+            o.hide_set(False)
+    for n in names - _GH["hidden"]:
+        o = bpy.data.objects.get(n)
+        if o and n in bpy.context.view_layer.objects:
+            o.hide_set(True)
+    _GH["hidden"] = set(names)
+
+
+def ghost_clear():
+    _set_hidden(set())
+    _GH.update(tris=None, lines=None, core=None, key=None, sig=None)
+
+
+def ghost_compute(context, coll):
+    """tylko stan fizyczny desek (bez siatek, bez detali) -> nakladka; ruszone oryginaly ukryte"""
+    from . import wyrwanie
+    pw = context.scene.deski_teren
+    if _GH["meshes_dirty"]:                                  # po trybie Pelnym - najpierw oryginaly
+        restore(coll); _GH["meshes_dirty"] = False; _GH["hidden"] = set()
+    key = (coll.name, pw.segment_length, pw.nail_position)
+    if _GH["core"] is None or _GH["key"] != key:
+        core = wyrwanie.DeformCore()
+        core.board_cache, core.h_cache, core.keep_tb = {}, {}, True
+        _GH.update(core=core, key=key, sig=None)
+    core = _GH["core"]
+    sig = _field_sig(pw)
+    if sig != _GH["sig"]:
+        core.h_cache.clear(); core.TB = None; _GH["sig"] = sig
+    res = core.solve(context, wyrwanie.Settings(pw, boards=coll, steps=min(pw.steps, 60), verify=False))
+    if res[0] is None:
+        _set_hidden(set()); _GH.update(tris=None, lines=None)
+        return res[2]
+    boards, moved, thrown, skipped = res
+    tris, tcol, lines = [], [], []
+    for b in moved:
+        col = PHASE_COL.get(b.phase, PHASE_COL[3])
+        ks = range(b.N + 1) if b.kinks else (0, b.N)
+        W2 = b.W / 2
+        secs = [(b.node_point(k, -W2, 0.0), b.node_point(k, W2, 0.0), b.node_point(k, W2, b.T), b.node_point(k, -W2, b.T))
+                for k in ks]
+        for s0, s1 in zip(secs, secs[1:]):
+            for i in range(4):
+                a0, a1, b0, b1 = s0[i], s0[(i + 1) % 4], s1[i], s1[(i + 1) % 4]
+                tris += [a0, a1, b1, a0, b1, b0]
+        for sc_ in (secs[0], secs[-1]):
+            tris += [sc_[0], sc_[1], sc_[2], sc_[0], sc_[2], sc_[3]]
+            for i in range(4):
+                lines += [sc_[i], sc_[(i + 1) % 4]]
+        for i in (2, 3):                                     # dlugie krawedzie wierzchu
+            for s0, s1 in zip(secs, secs[1:]):
+                lines += [s0[i], s1[i]]
+        tcol += [col] * (len(tris) - len(tcol))
+    _GH["tris"] = ([tuple(v) for v in tris], tcol)
+    _GH["lines"] = [tuple(v) for v in lines]
+    _set_hidden({b.o.name for b in moved} | {b.o.name for b in thrown})
+    cnt = {1: 0, 2: 0, 3: 0}
+    for b in moved:
+        cnt[min(b.phase, 3)] += 1
+    msg = (f"Szkic: przybite {cnt[1]}, jeden gwozdz {cnt[2]}, wyrwane {cnt[3]}"
+           + (f", wyrzucone {len(thrown)}" if thrown else "") + f", nietkniete {len(boards) - len(moved) - len(thrown)}")
+    return msg
+
+
+def _draw_ghost():
+    ctx = bpy.context
+    sc = ctx.scene
+    if sc is None or not getattr(sc, "deski_podglad", None) or not sc.deski_podglad.active or not _GH["tris"]:
+        return
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+    pos, cols = _GH["tris"]
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.depth_mask_set(False)
+    sh = gpu.shader.from_builtin('SMOOTH_COLOR')
+    batch_for_shader(sh, 'TRIS', {"pos": pos, "color": cols}).draw(sh)
+    if _GH["lines"]:
+        shl = gpu.shader.from_builtin('UNIFORM_COLOR')
+        shl.uniform_float("color", (0.05, 0.05, 0.05, 0.8))
+        batch_for_shader(shl, 'LINES', {"pos": _GH["lines"]}).draw(shl)
+    gpu.state.depth_mask_set(True)
+    gpu.state.blend_set('NONE')
+
+
 # ---------------------------------------------------------------- przeliczenie
 def compute(context, final=False):
     from . import wyrwanie, detale
@@ -103,6 +207,12 @@ def compute(context, final=False):
     _state["running"] = True
     t0 = time.time()
     try:
+        if not final and pg.mode == 'SZKIC':
+            msg = ghost_compute(context, coll)
+            pg.message = f"[szkic {time.time() - t0:.2f} s] " + msg
+            return
+        ghost_clear()
+        _GH["meshes_dirty"] = not final
         restore(coll)
         over = {"boards": coll} if final else {"boards": coll, "bevel_segments": min(2, pw.bevel_segments),
                                                   "verify": False, "steps": min(pw.steps, 60)}
@@ -228,6 +338,7 @@ class DESKI_OT_live_accept(bpy.types.Operator):
 
     def execute(self, context):
         sc = context.scene; pg = sc.deski_podglad
+        ghost_clear()
         compute(context, final=True)
         forget(pg.coll or sc.deski_teren.boards)
         pg.active = False; pg.coll = None
@@ -248,6 +359,7 @@ class DESKI_OT_live_cancel(bpy.types.Operator):
     def execute(self, context):
         sc = context.scene; pg = sc.deski_podglad
         coll = pg.coll or sc.deski_teren.boards
+        ghost_clear()
         restore(coll)
         forget(coll)
         pg.active = False; pg.message = ""; pg.coll = None
@@ -270,6 +382,10 @@ class DESKI_OT_live_refresh(bpy.types.Operator):
 
 class DeskiLiveSettings(bpy.types.PropertyGroup):
     active: bpy.props.BoolProperty(name="Podglad aktywny", default=False)
+    mode: bpy.props.EnumProperty(name="Podglad", default='SZKIC', update=live_update, items=(
+        ('SZKIC', "Szkic", "Szybko: polprzezroczyste deski w kolorach stanu (zielona - przybita, zolta - jeden gwozdz, "
+                           "czerwona - wyrwana); prawdziwe siatki nietkniete, bez detali", 'SHADING_WIRE', 0),
+        ('PELNY', "Pelny", "Wolniej: prawdziwe siatki z petlami, bevelem i detalami", 'SHADING_TEXTURE', 1)))
     auto: bpy.props.BoolProperty(name="Przeliczaj od razu", default=True,
                                  description="Wylacz przy bardzo duzej liczbie desek - wtedy przycisk Przelicz")
     with_details: bpy.props.BoolProperty(name="Z detalami", default=True, update=live_update,
@@ -312,6 +428,8 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     if _on_frame not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame)
+    if not bpy.app.background:
+        _GH["handler"] = bpy.types.SpaceView3D.draw_handler_add(_draw_ghost, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
@@ -320,6 +438,8 @@ def unregister():
             lst.remove(h)
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
+    if _GH["handler"] is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_GH["handler"], 'WINDOW'); _GH["handler"] = None
     del bpy.types.Scene.deski_podglad
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

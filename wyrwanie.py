@@ -127,6 +127,12 @@ class Board:
         self.sg = [-self.L / 2 + self.L * j / (ns - 1) for j in range(ns)]
         self.wg = [-self.W / 2, -self.W / 4, 0.0, self.W / 4, self.W / 2]
 
+    def reset(self):
+        """stan jak po utworzeniu (uklad deski i gwozdzie zostaja)"""
+        self.shift = Vector(); self.phase = 0; self.nodes = None; self.kinks = []; self.poly = None; self.roll = None
+        for a in ("released", "floor", "side", "H"):
+            self.__dict__.pop(a, None)
+
     def rest_nodes(self):
         return [(s, 0.0) for s in self.sk]
 
@@ -191,13 +197,20 @@ class DeformCore:
         th_max = rnd.uniform(p.angle2_min, p.angle2_max)
         EPS, ds, kA, kB = p.clearance, b.ds, b.kA, b.kB
         a = b.sk[kB]
-        Hw = [[self.th(*(b.c + b.es * s + b.ew * w).xy) for w in b.wg] for s in b.sg]
+        hc = getattr(self, "h_cache", None)            # szkic: wysokosci terenu pod deska pamietane
+        Hw = hc.get(b.o.name) if hc is not None else None
+        if Hw is None:
+            Hw = [[self.th(*(b.c + b.es * s + b.ew * w).xy) for w in b.wg] for s in b.sg]
+            if hc is not None:
+                hc[b.o.name] = Hw
         H = [max(r) for r in Hw]
         if max(H) <= b.z0 and not getattr(self, "min_phase", {}).get(b.o.name):
             return False                                   # teren nie dochodzi do deski
         D = max(0.0, self.ttop - b.z0) + 0.01             # teren startuje ponizej deski
         phase, side, w_last = 1, 0, None
-        for t in range(p.steps + 1):
+        # kroki, zanim teren w ogole dosiegnie spodu deski, niczego nie zmieniaja - pomin je
+        t_first = max(0, int(p.steps * (1 - (max(H) - b.z0) / D)) - 1) if D > 0 else 0
+        for t in range(t_first, p.steps + 1):
             dz = -D * (1 - t / p.steps)
             g = [(s, max(h + dz - b.z0 + EPS, 0.0)) for s, h in zip(b.sg, H)]
             if phase == 1:
@@ -260,7 +273,7 @@ class DeformCore:
                 return 0.0
             lim = math.tan(psi_max)
             lo, hi = -lim, lim
-            for _ in range(60):                       # funkcja wypukla -> szukanie trojdzielne
+            for _ in range(32):                       # funkcja wypukla -> szukanie trojdzielne (dokladnosc ~1e-5)
                 m1, m2 = lo + (hi - lo) / 3, hi - (hi - lo) / 3
                 f1 = max(g - w * m1 for g, w in zip(gw, wg))
                 f2 = max(g - w * m2 for g, w in zip(gw, wg))
@@ -664,7 +677,8 @@ class DeformCore:
         scen = getattr(p, "scenario", 'TEREN')
         self.F = None
         if scen == 'TEREN':
-            self.terrain_bvh(context, terrain)
+            if not (getattr(self, "keep_tb", False) and getattr(self, "TB", None) is not None):
+                self.terrain_bvh(context, terrain)
         elif p.emitter is None:
             return 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
         boards, skipped = [], []
@@ -673,10 +687,17 @@ class DeformCore:
                 continue
             if o.data.shape_keys:
                 skipped.append(o.name + " (shape keys / animacja)"); continue
-            b = Board(o)
-            if not b.flat or b.T < 1e-4:
-                skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
-            b.setup(p.segment_length, p.nail_position)
+            bc = getattr(self, "board_cache", None)    # szkic: deski sie nie zmieniaja - uklad liczony raz
+            b = bc.get(o.name) if bc is not None else None
+            if b is not None:
+                b.reset()
+            else:
+                b = Board(o)
+                if not b.flat or b.T < 1e-4:
+                    skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
+                b.setup(p.segment_length, p.nail_position)
+                if bc is not None:
+                    bc[o.name] = b
             boards.append(b)
         if not boards:
             return None, 'ERROR', "Brak desek do przetworzenia"
@@ -703,8 +724,15 @@ class DeformCore:
         # deski stykajace sie koncami: rozsun wzdluz dlugosci
         pairs = []
         live = [b for b in boards if b.phase != 4]
+        # tylko sasiedzi z siatki przestrzennej (zamiast wszystkich par - przy setkach desek to sekundy)
+        cell = max(b.L for b in live) + 0.05 if live else 1.0
+        grid = {}
+        for b_ in live:
+            grid.setdefault((int(b_.c.x // cell), int(b_.c.y // cell)), []).append(b_)
         for a_ in live:
-            for b_ in live:
+            ax, ay = int(a_.c.x // cell), int(a_.c.y // cell)
+            near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for q in grid.get((ax + dx, ay + dy), ())]
+            for b_ in near:
                 if a_ is b_ or (a_.nodes is None and b_.nodes is None):
                     continue
                 if abs(a_.es.dot(b_.es)) < 0.995:
