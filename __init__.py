@@ -5,6 +5,7 @@
 # detale.py        - Detale desek: nierownosci, drzazgi, odksztalcenie wyrwanych desek, gwozdzie
 # podglad.py       - Podglad na zywo: zmiany ustawien od razu widoczne, Zatwierdz = wynik finalny
 # animacja.py      - Animacja wyrywania: stan fizyczny w czasie -> klucze obiektow / absolutne shape keys
+# efekty.py        - efekty statyczne: pekajacy lod, odklejanie wykladziny
 # ui.py            - panele: 1 Przygotowanie, 2 Wyrwanie, 3 Detale (+ zwijane podpanele)
 # Uzycie: View3D > Sidebar (N) > zakladka "Deski"
 bl_info = {
@@ -26,13 +27,14 @@ if "bpy" in locals():
     importlib.reload(detale)
     importlib.reload(podglad)
     importlib.reload(animacja)
+    importlib.reload(efekty)
     importlib.reload(ui)
 else:
-    from . import jodelka, przygotowanie, scenariusze, wyrwanie, detale, podglad, animacja, ui
+    from . import jodelka, przygotowanie, scenariusze, wyrwanie, detale, podglad, animacja, efekty, ui
 
 import bpy
 
-modules = (przygotowanie, wyrwanie, detale, podglad, animacja, ui)
+modules = (przygotowanie, wyrwanie, detale, podglad, animacja, efekty, ui)
 
 
 def register():

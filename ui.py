@@ -356,9 +356,55 @@ FEATURES = [
     _feature("use_decay", "Spalenie / zbutwienie", None, extra=_decay_props),
 ]
 
+# ================================================================ 4. EFEKTY
+class DESKI_PT_fx(Panel):
+    bl_label = "4  Efekty"
+    bl_idname = "DESKI_PT_fx"
+    bl_order = 3
+    bl_space_type, bl_region_type, bl_category = SPACE.values()
+
+    def draw_header(self, context):
+        self.layout.label(icon='FREEZE')
+
+    def draw(self, context):
+        self.layout.label(text="Efekty statyczne na płaszczyznach", icon='INFO')
+
+
+class DESKI_PT_fx_ice(Panel):
+    bl_label = "Pękający lód"
+    bl_parent_id = "DESKI_PT_fx"
+    bl_space_type, bl_region_type, bl_category = SPACE.values()
+
+    def draw_header(self, context):
+        self.layout.label(icon='FREEZE')
+
+    def draw(self, context):
+        from . import efekty
+        e = context.scene.deski_efekty
+        L = self.layout
+        col = split(L.column())
+        col.prop(e, "ice_source", text="Płyta lodu")
+        col.prop(e, "ice_impact", text="Uderzenie (Empty)")
+        col.prop(e, "ice_output", text="Wynik")
+        big(L, efekty.DESKI_OT_ice.bl_idname, "Rozbij lód", 'FREEZE', enabled=e.ice_source is not None)
+        col = split(L.column())
+        col.prop(e, "ice_radius", text="Promień uderzenia")
+        col.prop(e, "ice_floe", text="Rozmiar kry")
+        col.prop(e, "ice_hole", text="Przerębel")
+        col.prop(e, "ice_tilt", text="Maks. przechył (°)")
+        col.prop(e, "ice_sink", text="Zapadnięcie")
+        col.prop(e, "ice_bob", text="Kołysanie (°)")
+        col.separator()
+        col.prop(e, "ice_thickness", text="Grubość")
+        col.prop(e, "ice_gap", text="Szerokość pęknięć")
+        col.prop(e, "ice_chamfer", text="Faza")
+        col.prop(e, "ice_water", text="Dodaj wodę")
+        col.prop(e, "ice_seed", text="Seed")
+
+
 classes = (DESKI_PT_prep, DESKI_PT_prep_detect, DESKI_PT_prep_nails, DESKI_PT_prep_boards,
            DESKI_PT_panel, DESKI_PT_scen, DESKI_PT_nails, DESKI_PT_quality, DESKI_PT_options, DESKI_PT_anim,
-           DESKI_PT_details, *FEATURES)
+           DESKI_PT_details, *FEATURES, DESKI_PT_fx, DESKI_PT_fx_ice)
 
 
 def register():
