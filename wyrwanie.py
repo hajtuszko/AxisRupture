@@ -527,6 +527,71 @@ class DeformCore:
         o.matrix_world = new_mw
         return "wygieta"
 
+    # --- kolizje deska-deska: pary z glebokoscia przenikania (m)
+    def collisions(self, context, objs, changed, thr=0.002):
+        dg = context.evaluated_depsgraph_get()
+        geo = {}
+        for o in objs:
+            oe = o.evaluated_get(dg); me = oe.to_mesh()
+            vs = [oe.matrix_world @ v.co for v in me.vertices]
+            geo[o.name] = (vs, BVHTree.FromPolygons(vs, [tuple(q.vertices) for q in me.polygons]))
+            oe.to_mesh_clear()
+        dirs = [Vector((0.31, 0.17, 1)).normalized(), Vector((-0.23, 0.41, -1)).normalized(),
+                Vector((1, -0.37, 0.13)).normalized()]
+
+        def inside(v, bvh):
+            votes = 0
+            for d in dirs:
+                n, o_ = 0, v.copy()
+                while n < 50:
+                    hit = bvh.ray_cast(o_, d)
+                    if hit[0] is None:
+                        break
+                    n += 1; o_ = hit[0] + d * 1e-6
+                votes += n % 2
+            return votes >= 2
+
+        def depth(vs, bvh):
+            dd = 0.0
+            for v in vs:
+                r = bvh.find_nearest(v, 0.3)
+                if r[0] is not None and r[3] > dd and inside(v, bvh):
+                    dd = r[3]
+            return dd
+        out = []
+        names = [o.name for o in objs]
+        for i_, a_ in enumerate(names):
+            for b_ in names[i_ + 1:]:
+                if a_ not in changed and b_ not in changed:
+                    continue
+                if geo[a_][1].overlap(geo[b_][1]):
+                    d = max(depth(geo[a_][0], geo[b_][1]), depth(geo[b_][0], geo[a_][1]))
+                    if d > thr:
+                        out.append((a_, b_, d))
+        return out
+
+    def settle(self, context, boards, moved, rounds=10):
+        """rozsuniecie kolizji: swobodniejsza deska (mniej trzymajacych gwozdzi) podnoszona o glebokosc"""
+        objs = [b.o for b in boards if b.phase != 4]
+        rank = {b.o.name: b.phase for b in boards}
+        changed = {b.o.name for b in moved}
+        byname = {o.name: o for o in objs}
+        lifted = 0
+        for _ in range(rounds):
+            context.view_layer.update()
+            pairs = self.collisions(context, objs, changed)
+            if not pairs:
+                break
+            done = set()
+            for a_, b_, d in sorted(pairs, key=lambda t: -t[2]):
+                mv = a_ if rank.get(a_, 0) >= rank.get(b_, 0) else b_
+                if rank.get(mv, 0) == 0 or mv in done:
+                    continue
+                o = byname[mv]
+                o.matrix_world = Matrix.Translation((0, 0, d + 0.0015)) @ o.matrix_world
+                done.add(mv); lifted += 1
+        return lifted
+
     # --- kontrola wyniku
     def verify(self, context, boards, changed):
         dg = context.evaluated_depsgraph_get()
@@ -694,6 +759,9 @@ class DeformCore:
             b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
             b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
             b.o["deski_podloga"] = getattr(b, "floor", b.z0)   # najnizsze podparcie pod deska (swiat)
+        n_settle = 0
+        if getattr(p, "resolve_collisions", False):
+            n_settle = self.settle(context, boards, moved)
         if scen in ('ZAPADNIECIE', 'WYBUCH') and p.make_ground:
             scenariusze.build_ground(context, p, self.F, coll)
         for b in thrown:                                # wyrzucone podmuchem: ukryte (do animacji / gruzu)
@@ -703,6 +771,8 @@ class DeformCore:
                f"nietkniete: {len(boards) - len(moved) - len(thrown)}")
         if thrown:
             msg += f", wyrzucone (ukryte): {len(thrown)}"
+        if n_settle:
+            msg += f", podniesione (kolizje): {n_settle}"
         if skipped:
             msg += f", pominiete: {len(skipped)}"
         if p.verify:
@@ -826,6 +896,9 @@ class DeskiSettings(bpy.types.PropertyGroup):
     straight_tolerance: bpy.props.FloatProperty(name="Prosta ponizej (st.)", default=0.2, min=0.0,
                                                 description="Deska wygieta mniej niz tyle stopni zostaje nietknieta siatkowo")
     remove_rigidbody: bpy.props.BoolProperty(name="Usun Rigid Body z desek", default=True)
+    resolve_collisions: bpy.props.BoolProperty(name="Rozsun kolizje", default=True,
+                                               description="Deski przenikajace sie po wyginaniu: swobodniejsza (mniej "
+                                                           "trzymajacych gwozdzi) jest podnoszona o glebokosc przenikania")
     verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
 
 
@@ -857,7 +930,8 @@ class DESKI_PT_panel(bpy.types.Panel):
             else:
                 box.prop(p, "blast_strength"); box.prop(p, "peel_max"); box.prop(p, "throw_zone")
                 box.prop(p, "crater_size"); box.prop(p, "hole_depth"); box.prop(p, "make_ground")
-        col.prop(p, "boards")
+        row = col.row(); row.enabled = not context.scene.deski_podglad.active   # w trakcie podgladu - zablokowane
+        row.prop(p, "boards")
         podglad.draw_live(col, context)
         col.separator()
         col.prop(p, "seed"); col.prop(p, "nail_position")
@@ -867,7 +941,7 @@ class DESKI_PT_panel(bpy.types.Panel):
         r = box.row(align=True); r.prop(p, "angle2_min"); r.prop(p, "angle2_max")
         box = col.box(); box.label(text="Dokladnosc")
         box.prop(p, "segment_length"); box.prop(p, "bevel_width"); box.prop(p, "bevel_segments"); box.prop(p, "roll_max"); box.prop(p, "smooth_shading"); box.prop(p, "steps"); box.prop(p, "clearance")
-        col.prop(p, "remove_rigidbody"); col.prop(p, "verify")
+        col.prop(p, "remove_rigidbody"); col.prop(p, "resolve_collisions"); col.prop(p, "verify")
         from . import animacja
         animacja.draw_anim(col, context)
         col.separator()

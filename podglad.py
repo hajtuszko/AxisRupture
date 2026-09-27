@@ -97,15 +97,15 @@ def compute(context, final=False):
     from . import wyrwanie, detale
     sc = context.scene
     pg, pw, pd = sc.deski_podglad, sc.deski_teren, sc.deski_detale
-    coll = pw.boards
+    coll = pg.coll or pw.boards                          # kolekcja zapamietana na starcie sesji
     if coll is None or (pw.terrain if pw.scenario == 'TEREN' else pw.emitter) is None:
         pg.message = "Wskaz teren (albo obszar scenariusza) i kolekcje desek"; return
     _state["running"] = True
     t0 = time.time()
     try:
         restore(coll)
-        over = {} if final else {"bevel_segments": min(2, pw.bevel_segments), "verify": False,
-                                 "steps": min(pw.steps, 60)}
+        over = {"boards": coll} if final else {"boards": coll, "bevel_segments": min(2, pw.bevel_segments),
+                                                  "verify": False, "steps": min(pw.steps, 60)}
         core = wyrwanie.DeformCore()
         lvl, msg = core.run(context, wyrwanie.Settings(pw, **over), remove_rigidbody=False)
         if pg.with_details and core.moved is not None:
@@ -209,6 +209,7 @@ class DESKI_OT_live_start(bpy.types.Operator):
         if pw.remove_rigidbody:                               # raz, na starcie (tego Anuluj nie cofa)
             wyrwanie.remove_rigid_bodies(context, _boards(coll))
         n = snapshot(coll)
+        pg.coll = coll
         pg.active = True
         compute(context)
         self.report({'INFO'}, f"Podglad wlaczony ({n} desek zapamietanych). " + pg.message)
@@ -228,8 +229,8 @@ class DESKI_OT_live_accept(bpy.types.Operator):
     def execute(self, context):
         sc = context.scene; pg = sc.deski_podglad
         compute(context, final=True)
-        forget(sc.deski_teren.boards)
-        pg.active = False
+        forget(pg.coll or sc.deski_teren.boards)
+        pg.active = False; pg.coll = None
         self.report({'INFO'}, pg.message)
         return {'FINISHED'}
 
@@ -246,9 +247,10 @@ class DESKI_OT_live_cancel(bpy.types.Operator):
 
     def execute(self, context):
         sc = context.scene; pg = sc.deski_podglad
-        restore(sc.deski_teren.boards)
-        forget(sc.deski_teren.boards)
-        pg.active = False; pg.message = ""
+        coll = pg.coll or sc.deski_teren.boards
+        restore(coll)
+        forget(coll)
+        pg.active = False; pg.message = ""; pg.coll = None
         return {'FINISHED'}
 
 
@@ -273,6 +275,7 @@ class DeskiLiveSettings(bpy.types.PropertyGroup):
     with_details: bpy.props.BoolProperty(name="Z detalami", default=True, update=live_update,
                                          description="Podglad obejmuje tez Detale (drzazgi, pekniecia, gwozdzie)")
     message: bpy.props.StringProperty(name="Wynik")
+    coll: bpy.props.PointerProperty(name="Kolekcja sesji", type=bpy.types.Collection)
 
 
 def draw_live(layout, context):

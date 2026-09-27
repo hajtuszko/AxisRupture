@@ -768,7 +768,8 @@ class DESKI_PT_details(bpy.types.Panel):
     def draw(self, context):
         p = context.scene.deski_detale
         col = self.layout.column()
-        col.prop(p, "boards"); col.prop(p, "seed")
+        row = col.row(); row.enabled = not context.scene.deski_podglad.active
+        row.prop(p, "boards"); col.prop(p, "seed")
         for flag, props in (("use_jitter", ("jitter_lift", "jitter_tilt", "jitter_shift")),
                             ("use_splinters", ("splinter_chance", "splinter_depth", "splinter_teeth_min",
                                                "splinter_teeth_max", "splinter_out")),
