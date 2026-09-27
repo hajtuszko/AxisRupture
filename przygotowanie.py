@@ -377,30 +377,61 @@ def herring_layout(src, grid, model, size):
     return {key: (r, jd.along_uv(lat, size, *r, field=field)) for key, r in boards.items()}
 
 
+_CACHE = {}                                            # analiza tekstur - wspolna dla podzialu i podgladu
+
+
+def _img_key(img):
+    """obraz + plik + czas modyfikacji: ta sama tekstura = ta sama analiza"""
+    import os
+    path = bpy.path.abspath(img.filepath)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        mt = 0.0
+    return (img.name, path, mt)
+
+
+def _sub(gen, lo, hi):
+    """postep generatora (0..1, tekst) przeskalowany do zakresu lo..hi; zwraca jego wynik"""
+    try:
+        while True:
+            f, t = next(gen)
+            yield (lo + (hi - lo) * f, t)
+    except StopIteration as e:
+        return e.value
+
+
 def herring_fit_cached(cache, img, p):
+    return jd.run(herring_fit_iter(cache, img, p))
+
+
+def herring_fit_iter(cache, img, p):
     """Jodelka z tekstury, w trzech krokach:
     1) mapa szczelin ze wszystkich map materialu (AO, Cavity, Roughness, Specular, Displacement, Normal...),
     2) globalna siec z widma (kat, szerokosc) + dopasowanie dlugosci, wariantu i przesuniecia,
     3) kalibracja lokalna: pomiar kazdego odcinka szczeliny i gladkie pole korekty z pewnych pomiarow
        (zdjecie nie jest idealna siatka). Zwraca (grid, model, size)."""
     var = {"A": (0, 1), "B": (0, -1), "C": (1, 1), "D": (1, -1)}.get(p.herr_variant)
-    key = ("h", img.name, p.herr_length, var, p.herr_offset, p.herr_calibrate)
+    ik = _img_key(img)
+    key = ("h", ik, p.herr_length, var, p.herr_offset, p.herr_calibrate)
     if key not in cache:
-        if ("S", img.name) not in cache:
+        if ("S", ik) not in cache or cache[("S", ik)][1] is None:
             res = 2048 if max(img.size) >= 2048 else 1024
-            S, used = jd.seam_map(img, res)
+            S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.6)
             print("Przygotowanie desek - jodelka: mapy szczelin", used, "rozdzielczosc", res)
+            yield (0.62, "siatka desek (widmo)")
             lat, _ = jd.detect_lattice(S)
-            cache[("S", img.name)] = (S, lat, jd.edge_scores(S, lat))
-        S, lat, (E1, E2, org) = cache[("S", img.name)]
+            cache[("S", ik)] = (S, lat, jd.edge_scores(S, lat))
+        S, lat, (E1, E2, org) = cache[("S", ik)]
         k = lat[5]
         off = None
         if p.herr_offset >= 0:
             n_off = 2 * k
             off = (p.herr_offset // n_off, p.herr_offset % n_off)
-        model = jd.fit(E1, E2, org, k, p.herr_length, var, off)
+        model = yield from _sub(jd.fit_iter(E1, E2, org, k, p.herr_length, var, off), 0.65, 0.9)
         field = None
         if p.herr_calibrate:
+            yield (0.92, "kalibracja lokalna szczelin")
             field = jd.calibrate(S, lat, model)
             print("Przygotowanie desek - jodelka: kalibracja lokalna (px)", field["stats"])
         cache[key] = (tuple(lat) + (field,), model, S.shape[::-1])
@@ -493,27 +524,35 @@ def calibrate_straight(S, axis, seams, bands):
 
 
 def straight_detect_cached(cache, img, p):
+    return jd.run(straight_detect_iter(cache, img, p))
+
+
+def straight_detect_iter(cache, img, p):
     """uklad prostych desek (os, szczeliny, pasy z laczeniami) + pole korekty i rozmiar mapy (lub None)"""
-    key = ("s", img.name, p.straight_method, p.straight_calibrate, p.sensitivity, p.min_width, p.min_length,
+    ik = _img_key(img)
+    key = ("s", ik, p.straight_method, p.straight_calibrate, p.sensitivity, p.min_width, p.min_length,
            p.joint_cover, p.joint_contrast)
     if key in cache:
         return cache[key]
     field, size = None, None
     if p.straight_method == 'MAPS':
         res = 2048 if max(img.size) >= 2048 else 1024
-        if ("S", img.name) not in cache:
-            S, used = jd.seam_map(img, res)
+        if ("S", ik) not in cache:
+            S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.8)
             print("Przygotowanie desek - proste: mapy szczelin", used, "rozdzielczosc", res)
-            cache[("S", img.name)] = (S, None, None)
-        S = cache[("S", img.name)][0]
+            cache[("S", ik)] = (S, None, None)
+        S = cache[("S", ik)][0]
+        yield (0.85, "szczeliny i laczenia")
         # mapa szczelin: szczelina = jasny grzbiet -> dla wykrywania (ciemne linie) odwrocona
         axis, seams, bands = detect_planks(-S.astype(float), p.sensitivity, p.min_width, p.min_length,
                                            p.joint_cover, p.joint_contrast)
         size = (S.shape[1], S.shape[0])
         if p.straight_calibrate and len(seams) >= 2:
+            yield (0.92, "kalibracja lokalna szczelin")
             field = calibrate_straight(S, axis, seams, bands)
             print("Przygotowanie desek - proste: kalibracja lokalna (px)", field.get("stats"))
     else:
+        yield (0.5, "szczeliny (jasnosc)")
         axis, seams, bands = detect_planks(image_luminance(img), p.sensitivity, p.min_width,
                                            p.min_length, p.joint_cover, p.joint_contrast)
     cache[key] = (axis, seams, bands, field, size)
@@ -538,8 +577,90 @@ def warp_rect(field, size, r, step=None):
     return [(float(cs[i, 0] + Dp[0, i] / size[0]), float(cs[i, 1] + Dp[1, i] / size[1])) for i in range(len(cs))]
 
 
+# ---------------------------------------------------------------- dlugie zadania: porcjami, z paskiem postepu
+JOB = {"running": False, "frac": 0.0, "text": "", "cancel": False, "label": ""}
+
+
+class JobOperator:
+    """operator wykonujacy generator job(context) porcjami (~0.1 s na krok) z paskiem postepu w panelu;
+    Esc albo 'Przerwij' konczy prace (zrobione deski zostaja). Ze skryptow (execute) - od razu w calosci."""
+    _timer = None
+
+    def execute(self, context):
+        lvl, msg = jd.run(self.job(context))
+        self.report({lvl}, msg)
+        return {'CANCELLED'} if lvl == 'ERROR' else {'FINISHED'}
+
+    def invoke(self, context, event):
+        if JOB["running"]:
+            self.report({'WARNING'}, "Poprzednie zadanie jeszcze trwa"); return {'CANCELLED'}
+        self._gen = self.job(context)
+        JOB.update(running=True, frac=0.0, text="start", cancel=False, label=self.bl_label)
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.02, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _finish(self, context, lvl, msg):
+        context.window_manager.event_timer_remove(self._timer)
+        JOB.update(running=False, frac=1.0, text="", cancel=False)
+        context.workspace.status_text_set(None)
+        _redraw(context)
+        self.report({lvl}, msg)
+        return {'CANCELLED'} if lvl == 'ERROR' else {'FINISHED'}
+
+    def modal(self, context, event):
+        import time
+        if event.type == 'ESC' or JOB["cancel"]:
+            self._gen.close()
+            return self._finish(context, 'WARNING', f"{self.bl_label}: przerwano ({JOB['text']})")
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        t0 = time.time()
+        try:
+            while time.time() - t0 < 0.1:
+                f, txt = next(self._gen)
+                JOB["frac"], JOB["text"] = max(0.0, min(1.0, f)), txt
+        except StopIteration as e:
+            lvl, msg = e.value
+            return self._finish(context, lvl, msg)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            return self._finish(context, 'ERROR', f"{self.bl_label}: blad - {e}")
+        context.workspace.status_text_set(f"{self.bl_label}: {int(JOB['frac'] * 100)}% - {JOB['text']} (Esc = przerwij)")
+        _redraw(context)
+        return {'RUNNING_MODAL'}
+
+
+def _redraw(context):
+    for w in context.window_manager.windows:
+        for a in w.screen.areas:
+            if a.type == 'VIEW_3D':
+                a.tag_redraw()
+
+
+class DESKI_OT_job_cancel(bpy.types.Operator):
+    bl_idname = "object.deski_przerwij"
+    bl_label = "Przerwij"
+    bl_description = "Przerywa trwajace zadanie (zrobione deski zostaja)"
+
+    def execute(self, context):
+        JOB["cancel"] = True
+        return {'FINISHED'}
+
+
+def draw_job(layout, op_idname, icon, text=None):
+    """przycisk albo - w trakcie pracy - pasek postepu z opisem i przyciskiem Przerwij"""
+    if JOB["running"]:
+        box = layout.box()
+        box.progress(factor=JOB["frac"], type='BAR', text=f"{int(JOB['frac'] * 100)}%  {JOB['text']}")
+        box.operator(DESKI_OT_job_cancel.bl_idname, icon='CANCEL')
+    else:
+        layout.operator(op_idname, icon=icon, text=text) if text else layout.operator(op_idname, icon=icon)
+
+
 # ---------------------------------------------------------------- operator
-class DESKI_OT_split(bpy.types.Operator):
+class DESKI_OT_split(JobOperator, bpy.types.Operator):
     bl_idname = "object.deski_przygotuj"
     bl_label = "Podziel na deski"
     bl_description = ("Dzieli plaszczyzny z kolekcji na osobne deski wg szczelin wykrytych na teksturze "
@@ -550,44 +671,48 @@ class DESKI_OT_split(bpy.types.Operator):
     def poll(cls, context):
         return context.scene.deski_przygotowanie.source is not None
 
-    def execute(self, context):
+    def job(self, context):
+        """generator: (postep 0..1, tekst) ... -> (poziom, komunikat)"""
         p = context.scene.deski_przygotowanie
         src_objs = [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
         if not src_objs:
-            self.report({'ERROR'}, "W kolekcji nie ma plaszczyzn z UV"); return {'CANCELLED'}
+            return 'ERROR', "W kolekcji nie ma plaszczyzn z UV"
         out = bpy.data.collections.new(p.output_name or (p.source.name + " - deski"))
         context.scene.collection.children.link(out)
         total, msgs = 0, []
-        cache = {}
-        for src in src_objs:
+        cache = _CACHE
+        ns = len(src_objs)
+        for si, src in enumerate(src_objs):
+            lo, mid, hi = si / ns, (si + 0.85) / ns, (si + 1) / ns        # analiza tekstury trwa najdluzej
             img = find_texture(src, p.texture)
             if img is None:
                 msgs.append(f"{src.name}: brak tekstury (wskaz ja w polu Tekstura)"); continue
             if img.size[0] == 0:
-                self.report({'ERROR'}, f"Nie mozna wczytac obrazu {img.name} ({img.filepath})")
-                return {'CANCELLED'}
+                return 'ERROR', f"Nie mozna wczytac obrazu {img.name} ({img.filepath})"
             if p.layout == 'HERRINGBONE':
-                grid, model, size = herring_fit_cached(cache, img, p)
-                n = self.split_herringbone(src, out, grid, model, size, p)
+                grid, model, size = yield from _sub(herring_fit_iter(cache, img, p), lo, mid)
+                n = yield from _sub(self.split_herringbone(src, out, grid, model, size, p), mid, hi)
                 total += n
                 msgs.append(f"{src.name}: {n} desek jodelki ({img.name}, szerokosc {grid[2]:.1f} px, "
                             f"dlugosc {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]})")
                 if p.hide_source:
                     src.hide_set(True); src.hide_render = True
                 continue
-            axis, seams, bands, field, fsize = straight_detect_cached(cache, img, p)
+            axis, seams, bands, field, fsize = yield from _sub(straight_detect_iter(cache, img, p), lo, mid)
             if len(seams) < 2:
                 msgs.append(f"{src.name}: nie wykryto szczelin na {img.name}"); continue
             dots, cimg = [], None
             if p.detect_nails:
                 cimg = find_color_texture(src, p.nail_texture)
                 if cimg is not None and cimg.size[0] > 0:
-                    if ("n", cimg.name) not in cache:
-                        cache[("n", cimg.name)] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
-                    dots = cache[("n", cimg.name)]
-            n, nn = self.split_object(context, src, out, axis, bands, p, dots,
-                                      warp=(lambda r, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
-                                            warp_rect(f, z, r, st)) if field else None)
+                    nk = ("n", _img_key(cimg), p.nail_dark)
+                    if nk not in cache:
+                        yield (mid, "gwozdzie na teksturze")
+                        cache[nk] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
+                    dots = cache[nk]
+            n, nn = yield from _sub(self.split_object(context, src, out, axis, bands, p, dots,
+                                                      warp=(lambda r, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
+                                                            warp_rect(f, z, r, st)) if field else None), mid, hi)
             total += n
             msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
                         + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
@@ -596,8 +721,7 @@ class DESKI_OT_split(bpy.types.Operator):
                 src.hide_set(True); src.hide_render = True
         for m in msgs:
             print("Przygotowanie desek -", m)
-        self.report({'INFO'} if total else {'WARNING'}, f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs))
-        return {'FINISHED'} if total else {'CANCELLED'}
+        return ('INFO' if total else 'WARNING'), f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs)
 
     def split_herringbone(self, src, out, grid, model, size, p):
         """plaszczyzna -> deski jodelki (kazda deska z obrotem zgodnym z jej kierunkiem)"""
@@ -610,6 +734,7 @@ class DESKI_OT_split(bpy.types.Operator):
                 faces.append(([tuple(uv[l].uv) for l in poly.loop_indices], aff[0], face_material(src, poly)))
         if not faces:
             return 0
+        yield (0.0, "uklad desek")
         # ile metrow ma jedna kratka (szerokosc deski) - do szczeliny miedzy deskami
         import numpy as np
         N1, N2, per = grid[:3]
@@ -622,7 +747,10 @@ class DESKI_OT_split(bpy.types.Operator):
         shrink = (p.gap / 2) / max(m_cell, 1e-9)
         tol_uv = (p.gap * 0.45) / max(m_cell, 1e-9) * (np.linalg.norm(d) / max(size))   # 0.45 szczeliny w UV (2x0.45 < szczelina: bez nachodzenia)
         count = 0
-        for key, ((i0, i1, j0, j1), (du, dv)) in sorted(herring_layout(src, grid, model, size).items()):
+        items = sorted(herring_layout(src, grid, model, size).items())
+        for bi, (key, ((i0, i1, j0, j1), (du, dv))) in enumerate(items):
+            if bi % 10 == 0:
+                yield (bi / max(len(items), 1), f"deski {count} (uklad {bi}/{len(items)})")
             quad = simplify_outline(cell_poly(grid, size, i0, i1, j0, j1, shrink), tol_uv)
             polys, along = [], None
             for fuv, f3, mat in faces:
@@ -691,6 +819,7 @@ class DESKI_OT_split(bpy.types.Operator):
             edge_cache[(t, bi)] = res
             return res
 
+        yield (0.0, "podzial plaszczyzny")
         for poly in me.polygons:
             aff = face_uv_affine(me, poly, uv)
             if aff is None:
@@ -732,7 +861,10 @@ class DESKI_OT_split(bpy.types.Operator):
                         faces_uv.setdefault(key, []).append((cl, f3))
         count = 0
         n_nails = 0
-        for key, polys in sorted(pieces.items()):
+        items = sorted(pieces.items())
+        for bi, (key, polys) in enumerate(items):
+            if bi % 10 == 0:
+                yield (0.1 + 0.9 * bi / max(len(items), 1), f"deski {bi}/{len(items)}")
             res = self.make_board(src, out, polys, p, count + 1)
             if res is None:
                 continue
@@ -946,7 +1078,8 @@ class DESKI_PT_prep(bpy.types.Panel):
             box.prop(p, "herr_length"); box.prop(p, "herr_variant"); box.prop(p, "herr_offset")
             box.prop(p, "herr_calibrate")
             box.label(text="Kat i szerokosc desek - automatycznie", icon='INFO')
-            box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
+            if not JOB["running"]:
+                box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
         else:
             box.prop(p, "straight_method")
             sub = box.row(); sub.enabled = p.straight_method == 'MAPS'; sub.prop(p, "straight_calibrate")
@@ -961,10 +1094,10 @@ class DESKI_PT_prep(bpy.types.Panel):
         box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
         col.prop(p, "hide_source")
         col.separator()
-        col.operator(DESKI_OT_split.bl_idname, icon='MOD_EDGESPLIT')
+        draw_job(col, DESKI_OT_split.bl_idname, 'MOD_EDGESPLIT')
 
 
-class DESKI_OT_split_preview(bpy.types.Operator):
+class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
     bl_idname = "object.deski_podglad"
     bl_label = "Podglad podzialu"
     bl_description = ("Rysuje obrysy desek (wykryta jodelka) na plaszczyznach - do sprawdzenia dopasowania "
@@ -975,18 +1108,19 @@ class DESKI_OT_split_preview(bpy.types.Operator):
     def poll(cls, context):
         return context.scene.deski_przygotowanie.source is not None
 
-    def execute(self, context):
+    def job(self, context):
         p = context.scene.deski_przygotowanie
         old = bpy.data.objects.get("Podglad podzialu")
         if old:
             bpy.data.objects.remove(old)
         bm = bmesh.new()
-        cache, info = {}, []
-        for src in [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]:
+        cache, info = _CACHE, []
+        srcs = [o for o in p.source.all_objects if o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
+        for si, src in enumerate(srcs):
             img = find_texture(src, p.texture)
             if img is None or img.size[0] == 0:
                 info.append(f"{src.name}: brak tekstury"); continue
-            grid, model, size = herring_fit_cached(cache, img, p)
+            grid, model, size = yield from _sub(herring_fit_iter(cache, img, p), si / len(srcs), (si + 0.9) / len(srcs))
             info.append(f"{src.name}: dlugosc deski {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]}, "
                         f"zgodnosc {model[0]:.4f}")
             me = src.data; uv = me.uv_layers.active.data; mw = src.matrix_world
@@ -1008,11 +1142,10 @@ class DESKI_OT_split_preview(bpy.types.Operator):
         ob = bpy.data.objects.new("Podglad podzialu", me)
         ob.show_in_front = True; ob.hide_render = True
         context.scene.collection.objects.link(ob)
-        self.report({'INFO'}, "; ".join(info) or "Brak plaszczyzn")
-        return {'FINISHED'}
+        return 'INFO', "; ".join(info) or "Brak plaszczyzn"
 
 
-classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_PT_prep)
+classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_OT_job_cancel, DESKI_PT_prep)
 
 
 def register():

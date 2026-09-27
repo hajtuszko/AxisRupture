@@ -82,7 +82,20 @@ def _normal_valley(px, sigmas):
     return outs
 
 
+def run(gen):
+    """wykonaj generator do konca i zwroc jego wynik (wersja bez paska postepu)"""
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        return e.value
+
+
 def seam_map(img, res=1024):
+    return run(seam_map_iter(img, res))
+
+
+def seam_map_iter(img, res=1024):
     """Laczona mapa szczelin: kazda mapa materialu zamieniona na miare 'doliny' w srodku szczeliny
     (AO/Cavity/Specular/Gloss/wysokosc/kolor - ciemniej/nizej, Roughness - jasniej, Normal - wklesla
     krzywizna), wieloskalowo, odpornie znormalizowana i usredniona. Szczelina = jeden ostry grzbiet
@@ -98,7 +111,9 @@ def seam_map(img, res=1024):
         return np.minimum(np.clip((a - med) / (1.4826 * mad), 0, None), 8.0)
 
     normal_px = None
-    for key, path in maps.items():
+    n_maps = len(maps)
+    for i_map, (key, path) in enumerate(maps.items()):
+        yield (i_map / n_maps, f"mapa {i_map + 1}/{n_maps}: {key}")
         try:
             im = bpy.data.images.load(path, check_existing=True)
         except RuntimeError:
@@ -117,6 +132,7 @@ def seam_map(img, res=1024):
             continue
         used.append(key)
     if normal_px is not None:
+        yield (0.95, "mapa normalnych")
         a, b = _normal_valley(normal_px, sig)
         if ev:                                                # konwencja Y: zgodna z pozostalymi mapami
             ref = np.average(ev, 0, weights=wts)
@@ -281,13 +297,19 @@ def _var_xy(I, J, var):
 
 
 def fit(E1, E2, origin, k, n_user=0, var_user=None, off_user=None):
+    return run(fit_iter(E1, E2, origin, k, n_user, var_user, off_user))
+
+
+def fit_iter(E1, E2, origin, k, n_user=0, var_user=None, off_user=None):
     """najlepsza siec jodelki: (wynik, n, (cx, cy), wariant)"""
     import numpy as np
     i0, j0 = origin
     I, J = np.meshgrid(np.arange(E1.shape[0]) + i0, np.arange(E1.shape[1]) + j0, indexing='ij')
     best = None
     ns = [n_user] if n_user else range(k + 2, 12 * k + 1)
-    for var in ([var_user] if var_user else VARIANTS):
+    vs = [var_user] if var_user else VARIANTS
+    for i_var, var in enumerate(vs):
+        yield (i_var / len(vs), f"dopasowanie wzoru {i_var + 1}/{len(vs)}")
         X, Y = _var_xy(I, J, var)
         for n in ns:
             offs = [off_user] if off_user else [(cx, cy) for cx in range(2 * n) for cy in range(2 * k)]
