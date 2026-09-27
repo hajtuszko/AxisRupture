@@ -32,15 +32,16 @@ def _plain(v):
 def snapshot(coll):
     n = 0
     bset = set(_boards(coll))
-    for ob in bpy.data.objects:                             # gwozdzie sprzed podgladu zostaja
-        if ob.get("deski_gwozdz") and ob.parent in bset:
+    for ob in bpy.data.objects:                             # gwozdzie i dno sprzed podgladu zostaja
+        if (ob.get("deski_gwozdz") and ob.parent in bset) or ob.get("deski_scen"):
             ob["deski_gwozdz_staly"] = 1
     for o in _boards(coll):
         if o.get(SNAP):
             continue
         o.data.use_fake_user = True                   # oryginal zostaje nietkniety
         props = {k: _plain(o[k]) for k in o.keys() if k.startswith("deski_") and k != SNAP}
-        o[SNAP] = json.dumps({"mesh": o.data.name, "mw": _mw_list(o.matrix_world), "props": props})
+        o[SNAP] = json.dumps({"mesh": o.data.name, "mw": _mw_list(o.matrix_world), "props": props,
+                              "hide": [o.hide_get(), o.hide_render]})
         n += 1
     return n
 
@@ -49,8 +50,8 @@ def restore(coll):
     """deski jak przed podgladem; usuwa gwozdzie dodane przez Detale"""
     boards = _boards(coll)
     bset = set(boards)
-    for ob in [ob for ob in bpy.data.objects if ob.get("deski_gwozdz") and not ob.get("deski_gwozdz_staly")
-               and ob.parent in bset]:
+    for ob in [ob for ob in bpy.data.objects if not ob.get("deski_gwozdz_staly")
+               and ((ob.get("deski_gwozdz") and ob.parent in bset) or ob.get("deski_scen"))]:
         bpy.data.objects.remove(ob)
     for o in boards:
         d = o.get(SNAP)
@@ -66,6 +67,8 @@ def restore(coll):
             if old.users == 0:
                 bpy.data.meshes.remove(old)
         o.matrix_world = _mw_mat(d["mw"])
+        if "hide" in d:
+            o.hide_set(d["hide"][0]); o.hide_render = d["hide"][1]
         for k in [k for k in o.keys() if k.startswith("deski_") and k != SNAP]:
             del o[k]
         for k, v in d["props"].items():
@@ -95,8 +98,8 @@ def compute(context, final=False):
     sc = context.scene
     pg, pw, pd = sc.deski_podglad, sc.deski_teren, sc.deski_detale
     coll = pw.boards
-    if coll is None or pw.terrain is None:
-        pg.message = "Wskaz teren i kolekcje desek"; return
+    if coll is None or (pw.terrain if pw.scenario == 'TEREN' else pw.emitter) is None:
+        pg.message = "Wskaz teren (albo obszar scenariusza) i kolekcje desek"; return
     _state["running"] = True
     t0 = time.time()
     try:
@@ -193,7 +196,8 @@ class DESKI_OT_live_start(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         pw = context.scene.deski_teren
-        return pw.terrain is not None and pw.boards is not None and not context.scene.deski_podglad.active
+        src = pw.terrain if pw.scenario == 'TEREN' else pw.emitter
+        return src is not None and pw.boards is not None and not context.scene.deski_podglad.active
 
     def execute(self, context):
         from . import wyrwanie

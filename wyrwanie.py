@@ -424,12 +424,17 @@ class DeformCore:
         return True
 
     def lift(self, b, EPS):
-        """podniesienie w pionie, zeby deska nie wchodzila w teren ani w podloge"""
+        """podniesienie w pionie, zeby deska nie wchodzila w teren ani w podloge (albo w dno / sciane dziury)"""
         lift = 0.0
+        F = getattr(self, "F", None)
+        void = F is not None and F.mode in ('ZAPADNIECIE', 'WYBUCH')
         for k in range(b.N + 1):
             for w in (-b.W / 2, -b.W / 4, 0.0, b.W / 4, b.W / 2):
                 q = b.node_point(k, w)
-                lift = max(lift, self.th(q.x, q.y) + EPS - q.z, b.z0 - q.z)
+                if void:
+                    lift = max(lift, b.z0 + F.sup_rel(q.x, q.y) - q.z)
+                else:
+                    lift = max(lift, self.th(q.x, q.y) + EPS - q.z, b.z0 - q.z)
         return lift
 
     def end_extent(self, b, axis):
@@ -494,7 +499,7 @@ class DeformCore:
         stops = sorted([-b.L / 2, b.L / 2] + [k[0] for k in b.kinks])
         for (s_k, ang, width), (geom, _a, _w) in zip(b.kinks, loops):
             edges = [g for g in geom if isinstance(g, bmesh.types.BMEdge) and g.is_valid]
-            if not edges or ang < 1e-4:
+            if not edges or abs(ang) < 1e-4:
                 continue
             gap = min(abs(s_k - t) for t in stops if abs(s_k - t) > 1e-6)
             off = min(width, 0.45 * gap)
@@ -562,7 +567,7 @@ class DeformCore:
                     if d > 0.002:
                         bad += 1
         tbad = 0
-        for n in changed:
+        for n in (changed if self.TB is not None else ()):
             for v in geo[n][0]:
                 if self.th(v.x, v.y) - v.z > 0.002:
                     # wierzcholek pod powierzchnia terenu - policz tylko wyrazne przypadki
@@ -575,10 +580,15 @@ class DeformCore:
         """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
         self.moved = []
         terrain, coll = p.terrain, p.boards
-        self.terrain_bvh(context, terrain)
+        scen = getattr(p, "scenario", 'TEREN')
+        self.F = None
+        if scen == 'TEREN':
+            self.terrain_bvh(context, terrain)
+        elif p.emitter is None:
+            return 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
         boards, skipped = [], []
         for o in coll.all_objects:
-            if o.type != 'MESH' or o == terrain or not o.data.vertices:
+            if o.type != 'MESH' or o == terrain or o == p.emitter or not o.data.vertices:
                 continue
             if o.data.shape_keys:
                 skipped.append(o.name + " (shape keys)"); continue
@@ -589,18 +599,31 @@ class DeformCore:
             boards.append(b)
         if not boards:
             return 'ERROR', "Brak desek do przetworzenia"
-        moved = [b for b in boards if self.simulate(b, p)]
+        if scen != 'TEREN':
+            from . import scenariusze
+            z0s = sorted(b.z0 for b in boards)
+            self.F = scenariusze.Field(p, z0s[len(z0s) // 2])
+            self.TB = None
+            self.th = self.F.th; self.ttop = self.F.ttop; self.tbot = self.F.tbot
+        if scen in ('TEREN', 'WILGOC'):
+            moved = [b for b in boards if self.simulate(b, p)]
+        else:
+            moved = [b for b in boards if scenariusze.simulate_void(self, b, p, self.F)]
         self.moved = [b.o for b in moved]
         if not moved:
-            return 'WARNING', "Teren nie dochodzi do zadnej deski"
+            return 'WARNING', ("Teren nie dochodzi do zadnej deski" if scen == 'TEREN' else
+                               "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)")
         EPS = self._eps = p.clearance
+        thrown = [b for b in moved if b.phase == 4]
+        moved = [b for b in moved if b.phase != 4]
         for b in moved:
             if b.phase >= 2:
                 b.shift = Vector((0, 0, self.lift(b, EPS)))
         # deski stykajace sie koncami: rozsun wzdluz dlugosci
         pairs = []
-        for a_ in boards:
-            for b_ in boards:
+        live = [b for b in boards if b.phase != 4]
+        for a_ in live:
+            for b_ in live:
                 if a_ is b_ or (a_.nodes is None and b_.nodes is None):
                     continue
                 if abs(a_.es.dot(b_.es)) < 0.995:
@@ -654,9 +677,16 @@ class DeformCore:
                 data += list(inv @ top) + list(inv @ bot) + [1.0 if rel else 0.0]
             b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
             b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
-            b.o["deski_podloga"] = b.z0                 # poziom podlogi (swiat)
+            b.o["deski_podloga"] = getattr(b, "floor", b.z0)   # najnizsze podparcie pod deska (swiat)
+        if scen in ('ZAPADNIECIE', 'WYBUCH') and p.make_ground:
+            scenariusze.build_ground(context, p, self.F, coll)
+        for b in thrown:                                # wyrzucone podmuchem: ukryte (do animacji / gruzu)
+            b.o.hide_set(True); b.o.hide_render = True
+            b.o["deski_faza"] = "wyrzucona"
         msg = (f"Deski: {len(moved)} ruszone (proste: {stats['prosta']}, wygiete: {stats['wygieta']}), "
-               f"nietkniete: {len(boards) - len(moved)}")
+               f"nietkniete: {len(boards) - len(moved) - len(thrown)}")
+        if thrown:
+            msg += f", wyrzucone (ukryte): {len(thrown)}"
         if skipped:
             msg += f", pominiete: {len(skipped)}"
         if p.verify:
@@ -690,7 +720,8 @@ class DESKI_OT_deform(DeformCore, bpy.types.Operator):
     def poll(cls, context):
         p = context.scene.deski_teren
         pg = getattr(context.scene, "deski_podglad", None)
-        return p.terrain is not None and p.boards is not None and not (pg and pg.active)
+        src = p.terrain if p.scenario == 'TEREN' else p.emitter
+        return src is not None and p.boards is not None and not (pg and pg.active)
 
     def execute(self, context):
         lvl, msg = self.run(context, context.scene.deski_teren)
@@ -719,6 +750,29 @@ def mesh_poll(self, o):
 
 
 class DeskiSettings(bpy.types.PropertyGroup):
+    scenario: bpy.props.EnumProperty(name="Scenariusz", default='TEREN', items=(
+        ('TEREN', "Teren", "Teren w pozycji docelowej wypycha deski od spodu"),
+        ('WILGOC', "Wilgoc", "Wybrzuszenie od wilgoci: kopula / grzbiet pod deskami (Empty: srodek i promien, "
+                             "skala niejednorodna = elipsa / grzbiet)"),
+        ('ZAPADNIECIE', "Zapadniecie", "Dziura w podlodze: deski zwisaja z krawedzi albo wpadaja do srodka"),
+        ('WYBUCH', "Wybuch", "Krater i podmuch: deski odgiete w gore, najblizsze srodka wyrzucone")))
+    emitter: bpy.props.PointerProperty(name="Obszar", type=bpy.types.Object,
+                                       description="Empty (srodek, promien = rozmiar Empty) albo siatka (obrys); "
+                                                   "przesuwanie / skalowanie widac od razu w Podgladzie na zywo")
+    bulge_height: bpy.props.FloatProperty(name="Wysokosc wybrzuszenia", default=0.08, min=0.0, unit='LENGTH')
+    hole_depth: bpy.props.FloatProperty(name="Glebokosc", default=0.35, min=0.0, unit='LENGTH',
+                                        description="Glebokosc dziury / krateru pod podloga")
+    hang_max: bpy.props.FloatProperty(name="Maks. zwis (st.)", default=65.0, min=0.0, max=89.0,
+                                      description="Najwiekszy kat, o jaki deska zlamana na krawedzi opada w dziure")
+    crater_size: bpy.props.FloatProperty(name="Krater (czesc promienia)", default=0.45, min=0.0, max=1.0,
+                                         subtype='FACTOR')
+    blast_strength: bpy.props.FloatProperty(name="Sila podmuchu", default=1.0, min=0.0, max=3.0)
+    peel_max: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=70.0, min=0.0, max=89.0)
+    throw_zone: bpy.props.FloatProperty(name="Strefa wyrzucenia", default=0.3, min=0.0, max=1.0, subtype='FACTOR',
+                                        description="Deski, na ktore podmuch dziala silniej niz (1 - to), sa wyrzucone (ukryte)")
+    make_ground: bpy.props.BoolProperty(name="Utworz dno dziury / krateru", default=True,
+                                        description="Siatka dna (ten sam ksztalt, o ktory opieraja sie deski) - obiekt "
+                                                    "'<kolekcja> - dno', podmieniany przy kazdym przeliczeniu")
     terrain: bpy.props.PointerProperty(name="Teren", type=bpy.types.Object, poll=mesh_poll,
                                        description="Teren w pozycji docelowej (wypycha deski od spodu)")
     boards: bpy.props.PointerProperty(name="Deski", type=bpy.types.Collection,
@@ -769,7 +823,20 @@ class DESKI_PT_panel(bpy.types.Panel):
         from . import podglad
         p = context.scene.deski_teren
         col = self.layout.column()
-        col.prop(p, "terrain"); col.prop(p, "boards")
+        col.prop(p, "scenario")
+        if p.scenario == 'TEREN':
+            col.prop(p, "terrain")
+        else:
+            box = col.box()
+            box.prop(p, "emitter")
+            if p.scenario == 'WILGOC':
+                box.prop(p, "bulge_height")
+            elif p.scenario == 'ZAPADNIECIE':
+                box.prop(p, "hole_depth"); box.prop(p, "hang_max"); box.prop(p, "make_ground")
+            else:
+                box.prop(p, "blast_strength"); box.prop(p, "peel_max"); box.prop(p, "throw_zone")
+                box.prop(p, "crater_size"); box.prop(p, "hole_depth"); box.prop(p, "make_ground")
+        col.prop(p, "boards")
         podglad.draw_live(col, context)
         col.separator()
         col.prop(p, "seed"); col.prop(p, "nail_position")

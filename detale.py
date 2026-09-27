@@ -283,7 +283,8 @@ class DetailCore:
     def run(self, context, p, coll=None):
         """caly etap 3; zwraca (poziom, komunikat)"""
         coll = coll or p.boards or context.scene.deski_teren.boards
-        terrain = context.scene.deski_teren.terrain
+        pw = context.scene.deski_teren
+        terrain = pw.terrain if pw.scenario == 'TEREN' else None
         self.TB = None
         if terrain:
             dg = context.evaluated_depsgraph_get()
