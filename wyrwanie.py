@@ -181,7 +181,7 @@ class DeformCore:
 
     def th(self, x, y):
         hit = self.TB.ray_cast(Vector((x, y, self.ttop + 1.0)), Vector((0, 0, -1)))
-        return hit[0].z if hit[0] else -1e9
+        return hit[0].z + getattr(self, "zoff", 0.0) if hit[0] else -1e9
 
     # --- symulacja jednej deski
     def simulate(self, b, p):
@@ -193,7 +193,7 @@ class DeformCore:
         a = b.sk[kB]
         Hw = [[self.th(*(b.c + b.es * s + b.ew * w).xy) for w in b.wg] for s in b.sg]
         H = [max(r) for r in Hw]
-        if max(H) <= b.z0:
+        if max(H) <= b.z0 and not getattr(self, "min_phase", {}).get(b.o.name):
             return False                                   # teren nie dochodzi do deski
         D = max(0.0, self.ttop - b.z0) + 0.01             # teren startuje ponizej deski
         phase, side, w_last = 1, 0, None
@@ -236,6 +236,9 @@ class DeformCore:
                 if ang > th_max or under > EPS:
                     phase = 3
                     break
+        mp = getattr(self, "min_phase", {}).get(b.o.name)
+        if mp and mp[0] > phase:
+            phase, side = mp
         # przeszkody (teren/podloga) nad spodem deski w spoczynku, dla kazdego w w poprzek
         gfw = [[max(h - b.z0 + EPS, 0.0) for h in r] for r in Hw]
         wg = b.wg
@@ -576,8 +579,8 @@ class DeformCore:
                         tbad += 1; break
         return bad, worst, tbad
 
-    def run(self, context, p, remove_rigidbody=True):
-        """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
+    def solve(self, context, p, boards_in=None):
+        """stany desek (bez zmiany obiektow): (boards, moved, thrown, skipped) albo (None, poziom, komunikat)"""
         self.moved = []
         terrain, coll = p.terrain, p.boards
         scen = getattr(p, "scenario", 'TEREN')
@@ -587,18 +590,18 @@ class DeformCore:
         elif p.emitter is None:
             return 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
         boards, skipped = [], []
-        for o in coll.all_objects:
+        for o in (boards_in if boards_in is not None else coll.all_objects):
             if o.type != 'MESH' or o == terrain or o == p.emitter or not o.data.vertices:
                 continue
             if o.data.shape_keys:
-                skipped.append(o.name + " (shape keys)"); continue
+                skipped.append(o.name + " (shape keys / animacja)"); continue
             b = Board(o)
             if not b.flat or b.T < 1e-4:
                 skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
             b.setup(p.segment_length, p.nail_position)
             boards.append(b)
         if not boards:
-            return 'ERROR', "Brak desek do przetworzenia"
+            return None, 'ERROR', "Brak desek do przetworzenia"
         if scen != 'TEREN':
             from . import scenariusze
             z0s = sorted(b.z0 for b in boards)
@@ -611,8 +614,8 @@ class DeformCore:
             moved = [b for b in boards if scenariusze.simulate_void(self, b, p, self.F)]
         self.moved = [b.o for b in moved]
         if not moved:
-            return 'WARNING', ("Teren nie dochodzi do zadnej deski" if scen == 'TEREN' else
-                               "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)")
+            return None, 'WARNING', ("Teren nie dochodzi do zadnej deski" if scen == 'TEREN' else
+                                     "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)")
         EPS = self._eps = p.clearance
         thrown = [b for b in moved if b.phase == 4]
         moved = [b for b in moved if b.phase != 4]
@@ -651,6 +654,19 @@ class DeformCore:
         for b in moved:
             if b.phase >= 2:
                 b.shift += Vector((0, 0, self.lift(b, EPS)))
+        return boards, moved, thrown, skipped
+
+    def run(self, context, p, remove_rigidbody=True):
+        """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
+        res = self.solve(context, p)
+        if res[0] is None:
+            return res[1], res[2]
+        boards, moved, thrown, skipped = res
+        scen = getattr(p, "scenario", 'TEREN')
+        coll = p.boards
+        EPS = p.clearance
+        if scen in ('ZAPADNIECIE', 'WYBUCH'):
+            from . import scenariusze
         # usun Rigid Body (inaczej symulacja nadpisze ulozenie)
         if p.remove_rigidbody and remove_rigidbody:
             remove_rigid_bodies(context, [b.o for b in boards])
@@ -770,6 +786,11 @@ class DeskiSettings(bpy.types.PropertyGroup):
     peel_max: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=70.0, min=0.0, max=89.0)
     throw_zone: bpy.props.FloatProperty(name="Strefa wyrzucenia", default=0.3, min=0.0, max=1.0, subtype='FACTOR',
                                         description="Deski, na ktore podmuch dziala silniej niz (1 - to), sa wyrzucone (ukryte)")
+    anim_step: bpy.props.IntProperty(name="Co ile klatek", default=2, min=1, max=20,
+                                     description="Probkowanie symulacji w czasie (pomiedzy - interpolacja liniowa)")
+    anim_loops: bpy.props.IntProperty(name="Petle animacji", default=4, min=0, max=16,
+                                      description="Dodatkowe rownomierne petle w deskach wyginanych w animacji "
+                                                  "(luk przesuwajacy sie po desce potrzebuje geometrii)")
     make_ground: bpy.props.BoolProperty(name="Utworz dno dziury / krateru", default=True,
                                         description="Siatka dna (ten sam ksztalt, o ktory opieraja sie deski) - obiekt "
                                                     "'<kolekcja> - dno', podmieniany przy kazdym przeliczeniu")
@@ -808,7 +829,7 @@ class DeskiSettings(bpy.types.PropertyGroup):
     verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
 
 
-add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody"))
+add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))
 
 
 class DESKI_PT_panel(bpy.types.Panel):
@@ -847,6 +868,8 @@ class DESKI_PT_panel(bpy.types.Panel):
         box = col.box(); box.label(text="Dokladnosc")
         box.prop(p, "segment_length"); box.prop(p, "bevel_width"); box.prop(p, "bevel_segments"); box.prop(p, "roll_max"); box.prop(p, "smooth_shading"); box.prop(p, "steps"); box.prop(p, "clearance")
         col.prop(p, "remove_rigidbody"); col.prop(p, "verify")
+        from . import animacja
+        animacja.draw_anim(col, context)
         col.separator()
         col.operator(DESKI_OT_deform.bl_idname, icon='MOD_SIMPLEDEFORM')
 

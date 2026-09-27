@@ -293,7 +293,7 @@ class DetailCore:
             self.TB = BVHTree.FromPolygons(vs, [tuple(q.vertices) for q in me.polygons])
             self.ttop = max(v.z for v in vs)
             te.to_mesh_clear()
-        boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices
+        boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices and not o.data.shape_keys
                   and not o.name.startswith(NAIL_MESH) and o.dimensions.z > 1e-4]
         st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "pekniete": 0, "gwozdzie": 0, "pominiete": 0}
         backup = {}                                    # deska -> (siatka, macierz) sprzed detali

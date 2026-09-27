@@ -4,6 +4,7 @@
 # scenariusze.py   - scenariusze etapu 1: wilgoc (wybrzuszenie), zapadniecie (dziura), wybuch (krater)
 # detale.py        - Detale desek: nierownosci, drzazgi, odksztalcenie wyrwanych desek, gwozdzie
 # podglad.py       - Podglad na zywo: zmiany ustawien od razu widoczne, Zatwierdz = wynik finalny
+# animacja.py      - Animacja wyrywania: stan fizyczny w czasie -> klucze obiektow / absolutne shape keys
 # Uzycie: View3D > Sidebar (N) > zakladka "Deski"
 bl_info = {
     "name": "Deski: wyrwanie przez teren",
@@ -23,12 +24,13 @@ if "bpy" in locals():
     importlib.reload(wyrwanie)
     importlib.reload(detale)
     importlib.reload(podglad)
+    importlib.reload(animacja)
 else:
-    from . import jodelka, przygotowanie, scenariusze, wyrwanie, detale, podglad
+    from . import jodelka, przygotowanie, scenariusze, wyrwanie, detale, podglad, animacja
 
 import bpy
 
-modules = (przygotowanie, wyrwanie, detale, podglad)
+modules = (przygotowanie, wyrwanie, detale, podglad, animacja)
 
 
 def register():

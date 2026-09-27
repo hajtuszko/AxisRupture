@@ -173,7 +173,7 @@ def build_ground(context, p, F, coll):
             if math.hypot(u, v) > 1.05:
                 continue
             q = M @ Vector((u * F.rx, v * F.ry, 0.0))
-            grid[i, j] = bm.verts.new((q.x, q.y, F.floor + F.sup_rel(q.x, q.y) - 0.002))
+            grid[i, j] = bm.verts.new((q.x, q.y, F.sup_rel(q.x, q.y) - 0.002))   # wzgledem podlogi
     for i in range(n):
         for j in range(n):
             vs = [grid.get(k) for k in ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))]
@@ -195,5 +195,6 @@ def build_ground(context, p, F, coll):
         old = ob.data; ob.data = me
         if old.users == 0:
             bpy.data.meshes.remove(old)
-    ob.matrix_world = ob.matrix_world.Identity(4)
+    from mathutils import Matrix
+    ob.matrix_world = Matrix.Translation((0, 0, F.floor))   # poczatek na poziomie podlogi (skala Z = glebokosc)
     return ob
