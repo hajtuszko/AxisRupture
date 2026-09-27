@@ -120,6 +120,17 @@ def _set_hidden(names):
     _GH["hidden"] = set(names)
 
 
+def ghost_reset():
+    """zapomnij pamiec szkicu (po cofnieciu / wczytaniu pliku odwolania do obiektow sa nieaktualne)"""
+    _GH.update(core=None, key=None, sig=None)
+
+
+@persistent
+def _on_undo(*args):
+    ghost_reset()
+    _GH["hidden"] = {n for n in _GH["hidden"] if bpy.data.objects.get(n)}
+
+
 def ghost_clear():
     _set_hidden(set())
     _GH.update(tris=None, lines=None, core=None, key=None, sig=None)
@@ -140,7 +151,15 @@ def ghost_compute(context, coll):
     sig = _field_sig(pw)
     if sig != _GH["sig"]:
         core.h_cache.clear(); core.TB = None; _GH["sig"] = sig
-    res = core.solve(context, wyrwanie.Settings(pw, boards=coll, steps=min(pw.steps, 60), verify=False))
+    P = wyrwanie.Settings(pw, boards=coll, steps=min(pw.steps, 60), verify=False)
+    try:
+        res = core.solve(context, P)
+    except ReferenceError:                                   # dane zmienione pod spodem (cofniecie itp.) - od nowa
+        ghost_reset()
+        core = wyrwanie.DeformCore()
+        core.board_cache, core.h_cache, core.keep_tb = {}, {}, True
+        _GH.update(core=core, key=key, sig=sig)
+        res = core.solve(context, P)
     if res[0] is None:
         _set_hidden(set()); _GH.update(tris=None, lines=None)
         return res[2]
@@ -404,12 +423,17 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     if _on_frame not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame)
+    for lst in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post, bpy.app.handlers.load_post):
+        if _on_undo not in lst:
+            lst.append(_on_undo)
     if not bpy.app.background:
         _GH["handler"] = bpy.types.SpaceView3D.draw_handler_add(_draw_ghost, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
-    for h, lst in ((_on_depsgraph, bpy.app.handlers.depsgraph_update_post), (_on_frame, bpy.app.handlers.frame_change_post)):
+    for h, lst in ((_on_depsgraph, bpy.app.handlers.depsgraph_update_post), (_on_frame, bpy.app.handlers.frame_change_post),
+                   (_on_undo, bpy.app.handlers.undo_post), (_on_undo, bpy.app.handlers.redo_post),
+                   (_on_undo, bpy.app.handlers.load_post)):
         if h in lst:
             lst.remove(h)
     if bpy.app.timers.is_registered(_tick):

@@ -68,6 +68,11 @@ def canon(nodes, ds):
 
 
 # ---------------------------------------------------------------- deska
+def board_sig(o):
+    """podpis deski do pamieci szkicu: polozenie i liczba wierzcholkow"""
+    return (tuple(round(x, 6) for r in o.matrix_world for x in r), len(o.data.vertices), o.data.name)
+
+
 class Board:
     def __init__(self, o):
         self.o = o
@@ -690,13 +695,21 @@ class DeformCore:
             bc = getattr(self, "board_cache", None)    # szkic: deski sie nie zmieniaja - uklad liczony raz
             b = bc.get(o.name) if bc is not None else None
             if b is not None:
-                b.reset()
-            else:
+                try:                                   # obiekt nadal ten sam? (cofniecie / usuniecie unieważnia)
+                    same = b.o == o and b.sig == board_sig(o)
+                except ReferenceError:
+                    same = False
+                if same:
+                    b.reset()
+                else:
+                    b = None
+            if b is None:
                 b = Board(o)
                 if not b.flat or b.T < 1e-4:
                     skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
                 b.setup(p.segment_length, p.nail_position)
                 if bc is not None:
+                    b.sig = board_sig(o)
                     bc[o.name] = b
             boards.append(b)
         if not boards:
