@@ -619,6 +619,160 @@ def warp_rect(field, size, r, step=None, tol=0.0):
     return contain_quad(out, len(tu), len(tv), tol)
 
 
+# ---------------------------------------------------------------- nieregularne (kamienie, bruk)
+def _label_components(mask):
+    """spojne obszary maski (4-sasiedztwo, z zawijaniem - kafel bezszwowy): etykieta = indeks piksela, -1 poza"""
+    import numpy as np
+    h, w = mask.shape
+    BIG = h * w + 1
+    lab = np.where(mask, np.arange(h * w).reshape(h, w), BIG).astype(np.int64)
+    for _ in range(4000):
+        m = lab.copy()
+        for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            m = np.minimum(m, np.roll(lab, sh, ax))
+        m = np.where(mask, m, BIG)
+        flat = m.ravel()
+        v = flat < BIG
+        jumped = flat.copy()
+        jumped[v] = np.minimum(flat[v], flat[flat[v]])       # skok: etykieta piksela-etykiety
+        new = jumped.reshape(h, w)
+        if np.array_equal(new, lab):
+            break
+        lab = new
+    return np.where(lab < BIG, lab, -1)
+
+
+def _grow(lab, S):
+    """etykiety rosna w szczeliny (sasiedzi stykaja sie w srodku fugi); najpierw piksele o nizszej mapie szczelin"""
+    import numpy as np
+    for _ in range(500):
+        empty = lab < 0
+        if not empty.any():
+            break
+        best = np.full(lab.shape, -1, np.int64)
+        for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            nb = np.roll(lab, sh, ax)
+            best = np.where((best < 0) & (nb >= 0), nb, best)
+        lab = np.where(empty & (best >= 0), best, lab)
+    return lab
+
+
+def _loops(lab, x_off=0, y_off=0):
+    """obrysy obszarow z krawedzi pikseli (CCW, os y w gore): {etykieta: [petle [(x, y)...]]}"""
+    import numpy as np
+    edges = {}
+    for (dy, dx), (a, b) in (((0, 1), ((1, 0), (1, 1))), ((0, -1), ((0, 1), (0, 0))),
+                             ((1, 0), ((1, 1), (0, 1))), ((-1, 0), ((0, 0), (1, 0)))):
+        nb = np.roll(lab, (-dy, -dx), (0, 1))            # nb[y, x] = lab[y + dy, x + dx]
+        ys, xs = np.nonzero((nb != lab) & (lab >= 0))
+        for y, x, L in zip(ys.tolist(), xs.tolist(), lab[ys, xs].tolist()):
+            X, Y = x + x_off, y + y_off
+            edges.setdefault(L, {})[(X + a[0], Y + a[1])] = (X + b[0], Y + b[1])
+    out = {}
+    for L, nxt in edges.items():
+        loops = []
+        while nxt:
+            start, cur = next(iter(nxt.items()))
+            loop = [start]
+            del nxt[start]
+            while cur != start and cur in nxt:
+                loop.append(cur)
+                cur = nxt.pop(cur)
+            if len(loop) >= 4:
+                loops.append(loop)
+        out[L] = loops
+    return out
+
+
+def _dp_open(pts, tol):
+    import math as _m
+    if len(pts) <= 2:
+        return pts
+    a, b = pts[0], pts[-1]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = _m.hypot(dx, dy) or 1e-12
+    i, d = max(((i, abs((pts[i][0] - a[0]) * dy - (pts[i][1] - a[1]) * dx) / L) for i in range(1, len(pts) - 1)),
+               key=lambda t: t[1])
+    if d <= tol:
+        return [a, b]
+    return _dp_open(pts[:i + 1], tol)[:-1] + _dp_open(pts[i:], tol)
+
+
+def _offset_in(poly, dist):
+    """wielokat (CCW) cofniety do srodka o dist (wierzcholki wzdluz dwusiecznej, ograniczone)"""
+    n = len(poly); out = []
+    for i in range(n):
+        p0, p1, p2 = poly[i - 1], poly[i], poly[(i + 1) % n]
+        e1 = Vector((p1[0] - p0[0], p1[1] - p0[1])); e2 = Vector((p2[0] - p1[0], p2[1] - p1[1]))
+        if e1.length < 1e-12 or e2.length < 1e-12:
+            out.append(p1); continue
+        n1 = Vector((-e1.y, e1.x)).normalized(); n2 = Vector((-e2.y, e2.x)).normalized()
+        bis = n1 + n2
+        if bis.length < 1e-6:
+            bis = n1
+        bis.normalize()
+        k = min(dist / max(bis.dot(n1), 0.3), 3 * dist)
+        out.append((p1[0] + bis.x * k, p1[1] + bis.y * k))
+    return out
+
+
+def stones_detect_iter(cache, img, p):
+    """kamienie / bruk nieregularny: wielokaty w ukladzie kafla (UV 0..1, moga wychodzic poza) + rozmiar mapy"""
+    import numpy as np
+    ik = _img_key(img)
+    key = ("k", ik, p.stone_sens, p.stone_min, p.stone_simplify)
+    if key in cache:
+        return cache[key]
+    res = 1024
+    if ("S1024", ik) not in cache:
+        S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.6)
+        print("Przygotowanie desek - kamienie: mapy szczelin", used)
+        cache[("S1024", ik)] = S
+    S = cache[("S1024", ik)].astype(np.float64)
+    yield (0.62, "obszary kamieni")
+    inner = S < p.stone_sens
+    for _ in range(2):                                   # erozja: slabe polaczenia miedzy kamieniami znikaja
+        e = inner.copy()
+        for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            e &= np.roll(inner, sh, ax)
+        inner = e
+    lab = _label_components(inner)
+    ids, counts = np.unique(lab[lab >= 0], return_counts=True)
+    small = ids[counts < p.stone_min * res * res]
+    lab[np.isin(lab, small)] = -1
+    yield (0.75, "fugi (rozrost obszarow)")
+    lab = _grow(lab, S)
+    # obrysy na obrazie 3x3 (kamienie na brzegu kafla w calosci), wybierz kopie ze srodkiem w srodkowym kaflu
+    yield (0.82, "obrysy kamieni")
+    step = 2                                             # obrysy na 512 px (wystarczy, szybciej)
+    lab2 = lab[::step, ::step]
+    h2, w2 = lab2.shape
+    big = np.tile(lab2, (3, 3))
+    mg = int(0.35 * max(w2, h2))                         # kamienie na brzegu kafla: margines zamiast calego 3x3
+    sub = big[h2 - mg:2 * h2 + mg, w2 - mg:2 * w2 + mg]
+    loops = _loops(sub, x_off=w2 - mg, y_off=h2 - mg)
+    polys = []
+    for L, lps in loops.items():
+        for lp in lps:
+            ax = np.array(lp, float)
+            area = 0.5 * float(np.sum(ax[:, 0] * np.roll(ax[:, 1], -1) - np.roll(ax[:, 0], -1) * ax[:, 1]))
+            if area <= 0:
+                continue                                 # otwor (dziura w obszarze)
+            cx, cy = ax[:, 0].mean(), ax[:, 1].mean()
+            if not (w2 <= cx < 2 * w2 and h2 <= cy < 2 * h2):
+                continue
+            # uproszczenie: rozciecie petli na dwa luki
+            j = int(np.argmax((ax[:, 0] - ax[0, 0]) ** 2 + (ax[:, 1] - ax[0, 1]) ** 2))
+            lpp = [tuple(q) for q in lp]
+            simp = _dp_open(lpp[:j + 1], p.stone_simplify)[:-1] + _dp_open(lpp[j:] + [lpp[0]], p.stone_simplify)[:-1]
+            if len(simp) < 3:
+                continue
+            polys.append([((x - w2) / w2, (y - h2) / h2) for x, y in simp])
+    out = (polys, (w2, h2))
+    cache[key] = out
+    return out
+
+
 # ---------------------------------------------------------------- dlugie zadania: porcjami, z paskiem postepu
 JOB = {"running": False, "frac": 0.0, "text": "", "cancel": False, "label": ""}
 
@@ -731,6 +885,14 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                 msgs.append(f"{src.name}: brak tekstury (wskaz ja w polu Tekstura)"); continue
             if img.size[0] == 0:
                 return 'ERROR', f"Nie mozna wczytac obrazu {img.name} ({img.filepath})"
+            if p.layout == 'IRREGULAR':
+                polys, size = yield from _sub(stones_detect_iter(cache, img, p), lo, mid)
+                n = yield from _sub(self.split_stones(src, out, polys, p), mid, hi)
+                total += n
+                msgs.append(f"{src.name}: {n} kamieni ({img.name}, w kaflu {len(polys)})")
+                if p.hide_source:
+                    src.hide_set(True); src.hide_render = True
+                continue
             if p.layout == 'HERRINGBONE':
                 grid, model, size = yield from _sub(herring_fit_iter(cache, img, p), lo, mid)
                 n = yield from _sub(self.split_herringbone(src, out, grid, model, size, p), mid, hi)
@@ -764,6 +926,45 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         for m in msgs:
             print("Przygotowanie desek -", m)
         return ('INFO' if total else 'WARNING'), f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs)
+
+    def split_stones(self, src, out, polys, p):
+        """plaszczyzna -> kamienie: wielokaty z kafla powtorzone na kolejnych kaflach UV, cofniete o pol fugi"""
+        me = src.data
+        uv = me.uv_layers.active.data
+        faces = []
+        for poly in me.polygons:
+            aff = face_uv_affine(me, poly, uv)
+            if aff:
+                faces.append(([tuple(uv[l].uv) for l in poly.loop_indices], aff, face_material(src, poly)))
+        if not faces:
+            return 0
+        sc = max(src.matrix_world.to_scale())
+        m_uv = 0.5 * (faces[0][1][1] + faces[0][1][2]) * sc          # metry na jednostke UV (srednio)
+        g = (p.gap / 2) / max(m_uv, 1e-9)
+        us = [q[0] for f, _, _ in faces for q in f]; vs = [q[1] for f, _, _ in faces for q in f]
+        u0, u1, v0, v1 = min(us), max(us), min(vs), max(vs)
+        items = []
+        for tu in range(math.floor(u0) - 1, math.ceil(u1) + 1):
+            for tv in range(math.floor(v0) - 1, math.ceil(v1) + 1):
+                for pl in polys:
+                    q = [(x + tu, y + tv) for x, y in pl]
+                    if max(x for x, _ in q) < u0 or min(x for x, _ in q) > u1 or \
+                            max(y for _, y in q) < v0 or min(y for _, y in q) > v1:
+                        continue
+                    items.append(q)
+        count = 0
+        for bi, q in enumerate(items):
+            if bi % 10 == 0:
+                yield (bi / max(len(items), 1), f"kamienie {count} ({bi}/{len(items)})")
+            q = _offset_in(ccw(q), g)
+            pls = []
+            for fuv, aff, mat in faces:
+                cl = clip_board(q, fuv)
+                if len(cl) >= 3:
+                    pls.append(([(aff[0](u, v), (u, v)) for u, v in cl], mat))
+            if pls and self.make_board(src, out, pls, p, count + 1) is not None:
+                count += 1
+        return count
 
     def split_herringbone(self, src, out, grid, model, size, p):
         """plaszczyzna -> deski jodelki (kazda deska z obrotem zgodnym z jej kierunkiem)"""
@@ -1095,7 +1296,9 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     output_name: bpy.props.StringProperty(name="Kolekcja wynikowa", default="",
                                           description="Puste = '<kolekcja> - deski'")
     layout: bpy.props.EnumProperty(name="Uklad desek", default='STRAIGHT', items=(
-        ('STRAIGHT', "Proste deski", "Deski w rzedach, szczeliny wzdluz U lub V tekstury"),
+        ('STRAIGHT', "Rzędy", "Elementy w rzedach (deski, plytki, cegly): szczeliny wzdluz U lub V tekstury + laczenia"),
+        ('IRREGULAR', "Nieregularne", "Kamienie / bruk / kostka nieregularna: kazdy element wykryty jako obszar "
+                                      "otoczony fuga (dowolny ksztalt)"),
         ('HERRINGBONE', "Jodełka (skośne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
                                             "dlugosc deski podajesz recznie")))
     herr_length: bpy.props.IntProperty(name="Dlugosc deski (w szerokosciach)", default=0, min=0, max=30,
@@ -1111,6 +1314,13 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
                                        description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
                                                    "-1 = dopasuj do tekstury")
+    stone_sens: bpy.props.FloatProperty(name="Próg fugi", default=1.5, min=0.2, max=8.0,
+                                        description="Jak wyrazna musi byc fuga, by oddzielac kamienie. Mniej = wiecej, "
+                                                    "mniejszych kamieni")
+    stone_min: bpy.props.FloatProperty(name="Min. kamień", default=0.0006, min=0.00001, max=0.05, precision=5,
+                                       description="Mniejsze obszary (czesc kafla) sa doklejane do sasiadow")
+    stone_simplify: bpy.props.FloatProperty(name="Uproszczenie obrysu", default=1.2, min=0.3, max=6.0,
+                                            description="Tolerancja upraszczania obrysu (px mapy 512) - wiecej = mniej scian")
     straight_method: bpy.props.EnumProperty(name="Wykrywanie", default='MAPS', items=(
         ('MAPS', "Wszystkie mapy", "Szczeliny ze wszystkich map materialu (AO, Cavity, Roughness, Normal, wysokosc...) - "
                                    "odporne na sloje i plamy"),

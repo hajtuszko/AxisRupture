@@ -53,7 +53,7 @@ class DESKI_PT_prep(Panel):
         col.prop(p, "texture", text="Tekstura")
         col.prop(p, "output_name", text="Wynik")
         col.prop(p, "surface", text="Powierzchnia")
-        L.row().prop(p, "layout", expand=True)
+        L.grid_flow(row_major=True, columns=3, even_columns=True, align=True).prop(p, "layout", expand=True)
         L.separator()
         if pz.JOB["running"]:
             pz.draw_job(L, pz.DESKI_OT_split.bl_idname, 'MOD_EDGESPLIT')
@@ -73,6 +73,11 @@ class DESKI_PT_prep_detect(Panel):
     def draw(self, context):
         p = context.scene.deski_przygotowanie
         col = split(self.layout.column())
+        if p.layout == 'IRREGULAR':
+            col.prop(p, "stone_sens", text="Próg fugi")
+            col.prop(p, "stone_min", text="Min. kamień")
+            col.prop(p, "stone_simplify", text="Uproszczenie")
+            return
         if p.layout == 'HERRINGBONE':
             col.prop(p, "herr_length", text="Długość")
             col.prop(p, "herr_variant", text="Wariant")
