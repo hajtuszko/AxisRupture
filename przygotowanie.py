@@ -1043,7 +1043,7 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
                                           description="Puste = '<kolekcja> - deski'")
     layout: bpy.props.EnumProperty(name="Uklad desek", default='STRAIGHT', items=(
         ('STRAIGHT', "Proste deski", "Deski w rzedach, szczeliny wzdluz U lub V tekstury"),
-        ('HERRINGBONE', "Jodelka (skosne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
+        ('HERRINGBONE', "Jodełka (skośne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
                                             "dlugosc deski podajesz recznie")))
     herr_length: bpy.props.IntProperty(name="Dlugosc deski (w szerokosciach)", default=0, min=0, max=30,
                                        description="Ile szerokosci deski ma jej dlugosc. 0 = dobierz z tekstury "
@@ -1061,7 +1061,7 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     straight_method: bpy.props.EnumProperty(name="Wykrywanie", default='MAPS', items=(
         ('MAPS', "Wszystkie mapy", "Szczeliny ze wszystkich map materialu (AO, Cavity, Roughness, Normal, wysokosc...) - "
                                    "odporne na sloje i plamy"),
-        ('LUMA', "Jasnosc jednej mapy", "Poprzednia metoda: ciemne linie na jednej teksturze (AO / Base Color)")))
+        ('LUMA', "Jasność jednej mapy", "Poprzednia metoda: ciemne linie na jednej teksturze (AO / Base Color)")))
     straight_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
                                                description="Dopasuj kazda szczeline i kazde laczenie osobno (zdjecie nie "
                                                            "jest idealna siatka). Tylko z metoda 'Wszystkie mapy'")
@@ -1097,47 +1097,9 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
                                        description="O ile lebek musi byc ciemniejszy od drewna obok. Mniej = wiecej gwozdzi")
 
 
-class DESKI_PT_prep(bpy.types.Panel):
-    bl_label = "Przygotowanie desek"
-    bl_idname = "DESKI_PT_prep"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Deski"
-    bl_order = 0
-
-    def draw(self, context):
-        p = context.scene.deski_przygotowanie
-        col = self.layout.column()
-        col.prop(p, "source"); col.prop(p, "texture"); col.prop(p, "output_name")
-        col.prop(p, "layout", expand=True)
-        herr = p.layout == 'HERRINGBONE'
-        box = col.box(); box.label(text="Wykrywanie szczelin")
-        if herr:
-            box.prop(p, "herr_length"); box.prop(p, "herr_variant"); box.prop(p, "herr_offset")
-            box.prop(p, "herr_calibrate")
-            box.label(text="Kat i szerokosc desek - automatycznie", icon='INFO')
-            if not JOB["running"]:
-                box.operator(DESKI_OT_split_preview.bl_idname, icon='HIDE_OFF')
-        else:
-            box.prop(p, "straight_method")
-            sub = box.row(); sub.enabled = p.straight_method == 'MAPS'; sub.prop(p, "straight_calibrate")
-            box.prop(p, "sensitivity"); box.prop(p, "min_width"); box.prop(p, "min_length")
-            box.prop(p, "joint_contrast"); box.prop(p, "joint_cover")
-            box = col.box(); box.prop(p, "detect_nails")
-            sub = box.column(); sub.enabled = p.detect_nails
-            sub.prop(p, "nail_texture"); sub.prop(p, "nail_dark")
-        box = col.box(); box.label(text="Deski")
-        if not herr:
-            box.prop(p, "max_length")
-        box.prop(p, "thickness"); box.prop(p, "gap"); box.prop(p, "chamfer"); box.prop(p, "min_piece")
-        col.prop(p, "hide_source")
-        col.separator()
-        draw_job(col, DESKI_OT_split.bl_idname, 'MOD_EDGESPLIT')
-
-
 class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
     bl_idname = "object.deski_podglad"
-    bl_label = "Podglad podzialu"
+    bl_label = "Podgląd podziału"
     bl_description = ("Rysuje obrysy desek (wykryta jodelka) na plaszczyznach - do sprawdzenia dopasowania "
                       "do tekstury przed cieciem. Obiekt 'Podglad podzialu' mozna potem usunac")
     bl_options = {'REGISTER', 'UNDO'}
@@ -1183,7 +1145,7 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
         return 'INFO', "; ".join(info) or "Brak plaszczyzn"
 
 
-classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_OT_job_cancel, DESKI_PT_prep)
+classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_OT_job_cancel)
 
 
 def register():

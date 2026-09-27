@@ -335,7 +335,7 @@ class DESKI_OT_animate(bpy.types.Operator):
 
 class DESKI_OT_animate_clear(bpy.types.Operator):
     bl_idname = "object.deski_animuj_usun"
-    bl_label = "Usun animacje"
+    bl_label = "Usuń animację"
     bl_description = "Przywraca deski sprzed animacji (siatki, polozenie) i usuwa klucze"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -387,16 +387,6 @@ class DESKI_OT_animate_clear(bpy.types.Operator):
             n += 1
         self.report({'INFO'}, f"Przywrocono {n} desek")
         return {'FINISHED'}
-
-
-def draw_anim(layout, context):
-    p = context.scene.deski_teren
-    box = layout.box()
-    box.label(text=f"Animacja (klatki {context.scene.frame_start}-{context.scene.frame_end})", icon='RENDER_ANIMATION')
-    r = box.row(align=True); r.prop(p, "anim_step"); r.prop(p, "anim_loops")
-    r = box.row(align=True)
-    r.operator(DESKI_OT_animate.bl_idname, icon='PLAY')
-    r.operator(DESKI_OT_animate_clear.bl_idname, icon='X')
 
 
 classes = (DESKI_OT_animate, DESKI_OT_animate_clear)

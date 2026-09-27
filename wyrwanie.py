@@ -878,11 +878,12 @@ def mesh_poll(self, o):
 
 class DeskiSettings(bpy.types.PropertyGroup):
     scenario: bpy.props.EnumProperty(name="Scenariusz", default='TEREN', items=(
-        ('TEREN', "Teren", "Teren w pozycji docelowej wypycha deski od spodu"),
-        ('WILGOC', "Wilgoc", "Wybrzuszenie od wilgoci: kopula / grzbiet pod deskami (Empty: srodek i promien, "
-                             "skala niejednorodna = elipsa / grzbiet)"),
-        ('ZAPADNIECIE', "Zapadniecie", "Dziura w podlodze: deski zwisaja z krawedzi albo wpadaja do srodka"),
-        ('WYBUCH', "Wybuch", "Krater i podmuch: deski odgiete w gore, najblizsze srodka wyrzucone")))
+        ('TEREN', "Teren", "Teren w pozycji docelowej wypycha deski od spodu", 'MESH_GRID', 0),
+        ('WILGOC', "Wilgoć", "Wybrzuszenie od wilgoci: kopula / grzbiet pod deskami (Empty: srodek i promien, "
+                             "skala niejednorodna = elipsa / grzbiet)", 'MOD_FLUIDSIM', 1),
+        ('ZAPADNIECIE', "Zapadnięcie", "Dziura w podlodze: deski zwisaja z krawedzi albo wpadaja do srodka",
+         'SORT_DESC', 2),
+        ('WYBUCH', "Wybuch", "Krater i podmuch: deski odgiete w gore, najblizsze srodka wyrzucone", 'FORCE_FORCE', 3)))
     emitter: bpy.props.PointerProperty(name="Obszar", type=bpy.types.Object,
                                        description="Empty (srodek, promien = rozmiar Empty) albo siatka (obrys); "
                                                    "przesuwanie / skalowanie widac od razu w Podgladzie na zywo")
@@ -949,50 +950,7 @@ class DeskiSettings(bpy.types.PropertyGroup):
 add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))
 
 
-class DESKI_PT_panel(bpy.types.Panel):
-    bl_label = "Wyrwanie desek"
-    bl_idname = "DESKI_PT_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Deski"
-    bl_order = 1
-
-    def draw(self, context):
-        from . import podglad
-        p = context.scene.deski_teren
-        col = self.layout.column()
-        col.prop(p, "scenario")
-        if p.scenario == 'TEREN':
-            col.prop(p, "terrain")
-        else:
-            box = col.box()
-            box.prop(p, "emitter")
-            if p.scenario == 'WILGOC':
-                box.prop(p, "bulge_height")
-            elif p.scenario == 'ZAPADNIECIE':
-                box.prop(p, "hole_depth"); box.prop(p, "hang_max"); box.prop(p, "make_ground")
-            else:
-                box.prop(p, "blast_strength"); box.prop(p, "peel_max"); box.prop(p, "throw_zone")
-                box.prop(p, "crater_size"); box.prop(p, "hole_depth"); box.prop(p, "make_ground")
-        row = col.row(); row.enabled = not context.scene.deski_podglad.active   # w trakcie podgladu - zablokowane
-        row.prop(p, "boards")
-        podglad.draw_live(col, context)
-        col.separator()
-        col.prop(p, "seed"); col.prop(p, "nail_position"); col.prop(p, "bend_min_length")
-        box = col.box(); box.label(text="Progi zerwania gwozdzi")
-        r = box.row(align=True); r.prop(p, "bulge_min"); r.prop(p, "bulge_max")
-        r = box.row(align=True); r.prop(p, "slope_min"); r.prop(p, "slope_max")
-        r = box.row(align=True); r.prop(p, "angle2_min"); r.prop(p, "angle2_max")
-        box = col.box(); box.label(text="Dokladnosc")
-        box.prop(p, "segment_length"); box.prop(p, "bevel_width"); box.prop(p, "bevel_segments"); box.prop(p, "roll_max"); box.prop(p, "smooth_shading"); box.prop(p, "steps"); box.prop(p, "clearance")
-        col.prop(p, "remove_rigidbody"); col.prop(p, "resolve_collisions"); col.prop(p, "verify")
-        from . import animacja
-        animacja.draw_anim(col, context)
-        col.separator()
-        col.operator(DESKI_OT_deform.bl_idname, icon='MOD_SIMPLEDEFORM')
-
-
-classes = (DeskiSettings, DESKI_OT_deform, DESKI_PT_panel)
+classes = (DeskiSettings, DESKI_OT_deform)
 
 
 def register():

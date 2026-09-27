@@ -769,38 +769,7 @@ from .wyrwanie import add_live_updates
 add_live_updates(DeskiDetailSettings, skip=("boards",))
 
 
-class DESKI_PT_details(bpy.types.Panel):
-    bl_label = "Detale desek"
-    bl_idname = "DESKI_PT_details"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Deski"
-    bl_order = 2
-
-    def draw(self, context):
-        p = context.scene.deski_detale
-        col = self.layout.column()
-        row = col.row(); row.enabled = not context.scene.deski_podglad.active
-        row.prop(p, "boards"); col.prop(p, "seed")
-        for flag, props in (("use_jitter", ("jitter_lift", "jitter_tilt", "jitter_shift")),
-                            ("use_splinters", ("splinter_chance", "splinter_depth", "splinter_teeth_min",
-                                               "splinter_teeth_max", "splinter_out")),
-                            ("use_twist_nailed", ("twist_nailed",)),
-                            ("use_warp", ("warp_bow", "warp_twist", "warp_loops")),
-                            ("use_crack", ("crack_chance", "crack_min_length", "crack_angle", "crack_jag")),
-                            ("use_nails", ("nail_chance", "nail_length", "nail_diameter", "nail_head", "nail_tilt")),
-                            ("use_decay", ("decay_type", "decay_mode",
-                                           "decay_source" if p.decay_mode == 'OBSZAR' else "decay_coverage",
-                                           "decay_scale", "decay_erode", "decay_thin", "decay_seg", "decay_material"))):
-            box = col.box(); box.prop(p, flag)
-            sub = box.column(); sub.enabled = getattr(p, flag)
-            for n in props:
-                sub.prop(p, n)
-        col.separator()
-        col.operator(DESKI_OT_details.bl_idname, icon='MOD_NOISE')
-
-
-classes = (DeskiDetailSettings, DESKI_OT_details, DESKI_PT_details)
+classes = (DeskiDetailSettings, DESKI_OT_details)
 
 
 def register():

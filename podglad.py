@@ -13,7 +13,7 @@ _state = {"dirty": 0.0, "running": False, "last": 0.0}
 # szkic: wynik rysowany jako polprzezroczyste deski (nakladka GPU), prawdziwe siatki nietkniete
 _GH = {"core": None, "key": None, "sig": None, "tris": None, "lines": None, "hidden": set(), "meshes_dirty": False,
        "handler": None}
-PHASE_COL = {1: (0.35, 0.85, 0.35, 0.40), 2: (1.0, 0.75, 0.15, 0.45), 3: (1.0, 0.30, 0.25, 0.50)}
+PHASE_COL = {1: (0.35, 0.85, 0.35, 0.28), 2: (1.0, 0.75, 0.15, 0.32), 3: (1.0, 0.30, 0.25, 0.32)}
 
 
 def _boards(coll):
@@ -153,11 +153,10 @@ def ghost_compute(context, coll):
         secs = [(b.node_point(k, -W2, 0.0), b.node_point(k, W2, 0.0), b.node_point(k, W2, b.T), b.node_point(k, -W2, b.T))
                 for k in ks]
         for s0, s1 in zip(secs, secs[1:]):
-            for i in range(4):
+            for i in (1, 2, 3):                                # boki i wierzch (spod niewidoczny - bez warstw)
                 a0, a1, b0, b1 = s0[i], s0[(i + 1) % 4], s1[i], s1[(i + 1) % 4]
                 tris += [a0, a1, b1, a0, b1, b0]
         for sc_ in (secs[0], secs[-1]):
-            tris += [sc_[0], sc_[1], sc_[2], sc_[0], sc_[2], sc_[3]]
             for i in range(4):
                 lines += [sc_[i], sc_[(i + 1) % 4]]
         for i in (2, 3):                                     # dlugie krawedzie wierzchu
@@ -170,8 +169,8 @@ def ghost_compute(context, coll):
     cnt = {1: 0, 2: 0, 3: 0}
     for b in moved:
         cnt[min(b.phase, 3)] += 1
-    msg = (f"Szkic: przybite {cnt[1]}, jeden gwozdz {cnt[2]}, wyrwane {cnt[3]}"
-           + (f", wyrzucone {len(thrown)}" if thrown else "") + f", nietkniete {len(boards) - len(moved) - len(thrown)}")
+    msg = (f"przybite {cnt[1]} · luźne {cnt[2]} · wyrwane {cnt[3]} | "
+           + (f"wyrzucone {len(thrown)}, " if thrown else "") + f"nietknięte {len(boards) - len(moved) - len(thrown)}")
     return msg
 
 
@@ -209,7 +208,7 @@ def compute(context, final=False):
     try:
         if not final and pg.mode == 'SZKIC':
             msg = ghost_compute(context, coll)
-            pg.message = f"[szkic {time.time() - t0:.2f} s] " + msg
+            pg.message = f"Szkic: {time.time() - t0:.2f} s | " + msg
             return
         ghost_clear()
         _GH["meshes_dirty"] = not final
@@ -301,7 +300,7 @@ def _on_frame(scene, depsgraph=None):
 # ---------------------------------------------------------------- operatory
 class DESKI_OT_live_start(bpy.types.Operator):
     bl_idname = "object.deski_podglad_start"
-    bl_label = "Podglad na zywo"
+    bl_label = "Podgląd na żywo"
     bl_description = ("Wlacza podglad: kazda zmiana ustawien Wyrwania i Detali (albo przesuniecie terenu) "
                       "od razu przelicza deski w jakosci szkicowej. Zatwierdz = wynik finalny, Anuluj = powrot")
     bl_options = {'REGISTER', 'UNDO'}
@@ -328,7 +327,7 @@ class DESKI_OT_live_start(bpy.types.Operator):
 
 class DESKI_OT_live_accept(bpy.types.Operator):
     bl_idname = "object.deski_podglad_zatwierdz"
-    bl_label = "Zatwierdz"
+    bl_label = "Zatwierdź"
     bl_description = "Przelicza deski w pelnej jakosci (jak przyciski Wyrwij / Dodaj detale) i konczy podglad"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -385,36 +384,13 @@ class DeskiLiveSettings(bpy.types.PropertyGroup):
     mode: bpy.props.EnumProperty(name="Podglad", default='SZKIC', update=live_update, items=(
         ('SZKIC', "Szkic", "Szybko: polprzezroczyste deski w kolorach stanu (zielona - przybita, zolta - jeden gwozdz, "
                            "czerwona - wyrwana); prawdziwe siatki nietkniete, bez detali", 'SHADING_WIRE', 0),
-        ('PELNY', "Pelny", "Wolniej: prawdziwe siatki z petlami, bevelem i detalami", 'SHADING_TEXTURE', 1)))
+        ('PELNY', "Pełny", "Wolniej: prawdziwe siatki z petlami, bevelem i detalami", 'SHADING_TEXTURE', 1)))
     auto: bpy.props.BoolProperty(name="Przeliczaj od razu", default=True,
                                  description="Wylacz przy bardzo duzej liczbie desek - wtedy przycisk Przelicz")
     with_details: bpy.props.BoolProperty(name="Z detalami", default=True, update=live_update,
                                          description="Podglad obejmuje tez Detale (drzazgi, pekniecia, gwozdzie)")
     message: bpy.props.StringProperty(name="Wynik")
     coll: bpy.props.PointerProperty(name="Kolekcja sesji", type=bpy.types.Collection)
-
-
-def draw_live(layout, context):
-    """ramka podgladu - rysowana na gorze panelu Wyrwanie"""
-    pg = context.scene.deski_podglad
-    box = layout.box()
-    if not pg.active:
-        box.operator(DESKI_OT_live_start.bl_idname, icon='HIDE_OFF')
-        return
-    box.alert = True
-    box.label(text="PODGLAD NA ZYWO - zmiany widac od razu", icon='HIDE_OFF')
-    box.alert = False
-    r = box.row(); r.prop(pg, "with_details"); r.prop(pg, "auto")
-    if not pg.auto:
-        box.operator(DESKI_OT_live_refresh.bl_idname, icon='FILE_REFRESH')
-    r = box.row(align=True)
-    r.scale_y = 1.3
-    r.operator(DESKI_OT_live_accept.bl_idname, icon='CHECKMARK')
-    r.operator(DESKI_OT_live_cancel.bl_idname, icon='X')
-    if pg.message:
-        col = box.column(align=True)
-        for part in pg.message.split(" | "):
-            col.label(text=part)
 
 
 classes = (DeskiLiveSettings, DESKI_OT_live_start, DESKI_OT_live_accept, DESKI_OT_live_cancel, DESKI_OT_live_refresh)
