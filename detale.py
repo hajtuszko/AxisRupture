@@ -23,6 +23,15 @@ def board_frame(o):
     return B, L, W, size.z
 
 
+def no_ngons(bm):
+    """wszystkie n-gony -> trojkaty, potem z powrotem w czworokaty tam, gdzie plasko"""
+    ng = [f for f in bm.faces if len(f.verts) > 4]
+    if ng:
+        r = bmesh.ops.triangulate(bm, faces=ng, quad_method='BEAUTY', ngon_method='BEAUTY')
+        bmesh.ops.join_triangles(bm, faces=r["faces"], angle_face_threshold=math.radians(5),
+                                 angle_shape_threshold=math.pi, cmp_uvs=True, cmp_materials=True)
+
+
 def triangulate_ngons(bm, faces):
     ng = [f for f in faces if f.is_valid and len(f.verts) > 4]
     if ng:
@@ -507,7 +516,8 @@ class DetailCore:
         R = (Rb @ Matrix.Rotation(yaw, 3, 'Z') @ Matrix.Rotation(roll, 3, 'X') @ Matrix.Rotation(pitch, 3, 'Y')
              @ Rb.inverted()).to_4x4()
         M = Matrix.Translation(pivot) @ R @ Matrix.Translation(-pivot)
-        if p.use_twist_nailed and p.twist_nailed > 0:
+        short = L < bpy.context.scene.deski_teren.bend_min_length
+        if p.use_twist_nailed and p.twist_nailed > 0 and not short:
             # lekkie zwichrowanie przybitej deski (unosza sie narozniki) - 2 petle
             if o.data.users > 1:
                 o.data = o.data.copy()
@@ -549,12 +559,13 @@ class DetailCore:
                 f, zone = res
                 npts = [f(q) for q in npts]; cracked = 1
                 avoid = [zone]                          # petle odksztalcenia omijaja linie pekniecia
-        if p.use_warp:
+        if p.use_warp and L >= bpy.context.scene.deski_teren.bend_min_length:
             add_loops(bm, L, p.warp_loops, end_margin, avoid=avoid)
             warp = Warp(L, rng.uniform(0.3, 1.0) * p.warp_bow * L * rng.choice((-1, 1)),
                         math.radians(p.warp_twist) * rng.uniform(-1, 1))
             warp_board(bm, warp)
             npts = [warp(q) for q in npts]; warped = 1
+        no_ngons(bm)
         bm.transform(B.inverted())
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.to_mesh(o.data); bm.free(); o.data.update()
@@ -624,6 +635,7 @@ class DetailCore:
                 if m > 0 and v.is_valid:
                     k = 1 - p.decay_thin * m * (0.6 + 0.4 * nz)
                     v.co.z = zmin + (v.co.z - zmin) * k
+        no_ngons(bm)
         bm.transform(B.inverted())
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.to_mesh(o.data); bm.free(); o.data.update()

@@ -345,7 +345,20 @@ class DeformCore:
 
         L2 = b.L / 2
         kinks = []                                     # (s spoczynkowe, kat zalamania, promien bevela)
-        if phase == 2:
+        rigid = b.L < getattr(p, "bend_min_length", 0.0)
+        if rigid and phase == 1:
+            phase = 3                                  # krotka deska sie nie wygina - gwozdzie puszczaja, lezy na terenie
+        if rigid and phase == 2:
+            # krotka deska: sztywny obrot wokol konca po stronie trzymajacego gwozdzia (bez zgiecia)
+            s_p = -L2 if side == 1 else L2
+            samples = [(side * (s - s_p), max(gw)) for s, gw in zip(b.sg, gfw) if side * (s - s_p) > 1e-6]
+            th = 0.0
+            for d_, g_ in samples:
+                th = max(th, math.atan2(g_, d_))
+            th = min(th, math.radians(80))
+            nodes = [(s_p + side * abs(s - s_p) * math.cos(th), abs(s - s_p) * math.sin(th)) for s in b.sk]
+            poly = None
+        elif phase == 2:
             # najwieksze naprezenie przy trzymajacym gwozdziu: tam petla, dalej sztywna prosta
             kH = kA if side == 1 else kB
             sH = b.sk[kH]
@@ -361,7 +374,7 @@ class DeformCore:
             if th > 1e-4:
                 kinks.append((sH, th, bw))
             nodes = poly_nodes(poly)
-        elif phase == 3:
+        if phase == 3:
             # wyrwana: prosta, sztywna deska oparta o teren pod swoim srodkiem (przechylona w poprzek)
             def rest_line(psi):
                 gf = [(s, g_eff(gw, psi)) for s, gw in zip(b.sg, gfw)]
@@ -379,7 +392,7 @@ class DeformCore:
             nodes = [((k - N / 2) * ds * math.cos(phi), z_c + (k - N / 2) * ds * math.sin(phi))
                      for k in range(N + 1)]
             roll = [psi_c] * (N + 1)
-        else:
+        elif phase == 1:
             # przybita na obu gwozdziach: petle przy gwozdziach i na wierzcholku nad terenem
             smp = [(s, gfw[j]) for j, s in enumerate(b.sg) if -a < s < a]
             tA = max([math.atan2(max(gw), s + a) for s, gw in smp] + [0.0])
@@ -418,7 +431,7 @@ class DeformCore:
                 kinks = [kk for kk in kinks if kk[1] > 1e-4]
             nodes = poly_nodes(poly)
         b.kinks = kinks
-        b.poly = poly if phase in (1, 2) else None
+        b.poly = poly if phase in (1, 2) and not (rigid and phase == 2) else None
         b.roll = roll
         b.nodes = canon(nodes, ds)
         b.phase = phase
@@ -570,7 +583,7 @@ class DeformCore:
                         out.append((a_, b_, d))
         return out
 
-    def settle(self, context, boards, moved, rounds=10):
+    def settle(self, context, boards, moved, rounds=16):
         """rozsuniecie kolizji: swobodniejsza deska (mniej trzymajacych gwozdzi) podnoszona o glebokosc"""
         objs = [b.o for b in boards if b.phase != 4]
         rank = {b.o.name: b.phase for b in boards}
@@ -900,6 +913,9 @@ class DeskiSettings(bpy.types.PropertyGroup):
                                                description="Deski przenikajace sie po wyginaniu: swobodniejsza (mniej "
                                                            "trzymajacych gwozdzi) jest podnoszona o glebokosc przenikania")
     verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
+    bend_min_length: bpy.props.FloatProperty(name="Min. dlugosc do giecia", default=0.6, min=0.0, unit='LENGTH',
+                                             description="Deski krotsze (np. klepki jodelki) sa sztywne: teren je podnosi "
+                                                         "i przechyla w calosci, bez wyginania i bez odksztalcen w Detalach")
 
 
 add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))
@@ -934,7 +950,7 @@ class DESKI_PT_panel(bpy.types.Panel):
         row.prop(p, "boards")
         podglad.draw_live(col, context)
         col.separator()
-        col.prop(p, "seed"); col.prop(p, "nail_position")
+        col.prop(p, "seed"); col.prop(p, "nail_position"); col.prop(p, "bend_min_length")
         box = col.box(); box.label(text="Progi zerwania gwozdzi")
         r = box.row(align=True); r.prop(p, "bulge_min"); r.prop(p, "bulge_max")
         r = box.row(align=True); r.prop(p, "slope_min"); r.prop(p, "slope_max")

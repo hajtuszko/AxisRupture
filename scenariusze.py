@@ -93,6 +93,9 @@ def simulate_void(core, b, p, F):
         return True
     if not fA and not fB:
         return False                                     # trzyma sie (np. most nad dziura)
+    rigid = b.L < getattr(p, "bend_min_length", 0.0)
+    if rigid and F.mode == 'ZAPADNIECIE':
+        fA = fB = True                                   # krotka deska sie nie zgina na krawedzi - zsuwa sie i opiera
 
     def poly_nodes(poly):
         out = []
@@ -144,6 +147,15 @@ def simulate_void(core, b, p, F):
                     th = min(th, math.atan2(-(gmax[j] - p.clearance), dd))
             th = max(th, 0.0); sgn = -1.0
         a = sgn * th
+        if rigid:
+            # krotka deska: sztywny obrot wokol konca po stronie trzymajacego gwozdzia
+            s_p = -L2 if side == 1 else L2
+            nodes = [(s_p + side * abs(s - s_p) * math.cos(a), abs(s - s_p) * math.sin(a)) for s in b.sk]
+            b.phase, b.side = 2, side
+            b.kinks, b.poly, b.roll = [], None, roll
+            b.nodes = canon(nodes, ds)
+            b.H = [0.0] * len(b.sg)
+            return True
         if side == 1:
             poly = [(-L2, -L2, 0.0), (se, se, 0.0), (L2, se + (L2 - se) * math.cos(a), (L2 - se) * math.sin(a))]
         else:
