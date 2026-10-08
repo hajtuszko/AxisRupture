@@ -34,6 +34,12 @@ def live_active(context):
     return bool(pg and pg.active)
 
 
+def live_locked(context):
+    """pole kolekcji zablokowane tylko w trwajacej sesji z kolekcja (inaczej da sie wskazac nowe deski)"""
+    pg = getattr(context.scene, "deski_podglad", None)
+    return bool(pg and pg.active and pg.coll is not None)
+
+
 # ================================================================ 1. PRZYGOTOWANIE
 class DESKI_PT_prep(Panel):
     bl_label = "1  Przygotowanie desek"
@@ -132,6 +138,7 @@ class DESKI_PT_prep_boards(Panel):
         col.prop(p, "chamfer", text="Faza krawędzi")
         col.prop(p, "min_piece", text="Min. kawałek")
         col.prop(p, "hide_source", text="Ukryj płaszczyznę")
+        col.prop(p, "replace_output", text="Zastąp poprzedni wynik")
 
 
 # ================================================================ 2. WYRWANIE
@@ -158,7 +165,7 @@ class DESKI_PT_panel(Panel):
             col.prop(p, "terrain", text="Teren")
         else:
             col.prop(p, "emitter", text="Obszar (Empty)")
-        r = col.row(); r.enabled = not pg.active
+        r = col.row(); r.enabled = not live_locked(context)
         r.prop(p, "boards", text="Deski")
         L.separator()
         ready = (p.terrain if p.scenario == 'TEREN' else p.emitter) is not None and p.boards is not None
@@ -166,6 +173,8 @@ class DESKI_PT_panel(Panel):
             big(L, podglad.DESKI_OT_live_start.bl_idname, "Podgląd na żywo", 'HIDE_OFF', enabled=ready)
             r = L.row(); r.enabled = ready
             r.operator(wyrwanie.DESKI_OT_deform.bl_idname, text="Wyrwij od razu", icon='MOD_SIMPLEDEFORM')
+            r = L.row(); r.enabled = p.boards is not None
+            r.operator(wyrwanie.DESKI_OT_reset.bl_idname, text="Przywróć oryginalne deski", icon='LOOP_BACK')
             return
         # --- trwa podglad
         box = L.box()
@@ -311,7 +320,7 @@ class DESKI_PT_details(Panel):
         p = context.scene.deski_detale
         L = self.layout
         col = split(L.column())
-        r = col.row(); r.enabled = not live_active(context)
+        r = col.row(); r.enabled = not live_locked(context)
         r.prop(p, "boards", text="Deski")
         col.prop(p, "seed", text="Seed")
         L.separator()
@@ -404,6 +413,7 @@ class DESKI_PT_fx_ice(Panel):
         col.prop(e, "ice_gap", text="Szerokość pęknięć")
         col.prop(e, "ice_chamfer", text="Faza")
         col.prop(e, "ice_water", text="Dodaj wodę")
+        col.prop(e, "ice_replace", text="Zastąp poprzedni wynik")
         col.prop(e, "ice_seed", text="Seed")
 
 

@@ -367,6 +367,8 @@ class DetailCore:
             te.to_mesh_clear()
         boards = [o for o in coll.all_objects if o.type == 'MESH' and o.data.vertices and not o.data.shape_keys
                   and not o.name.startswith(NAIL_MESH) and o.dimensions.z > 1e-4]
+        from .wyrwanie import remember_originals
+        remember_originals(boards)
         st = {"nierownosci": 0, "drzazgi": 0, "odksztalcone": 0, "pekniete": 0, "gwozdzie": 0, "pominiete": 0,
               "rozklad": 0}
         backup = {}                                    # deska -> (siatka, macierz) sprzed detali

@@ -17,7 +17,17 @@ PHASE_COL = {1: (0.35, 0.85, 0.35, 0.28), 2: (1.0, 0.75, 0.15, 0.32), 3: (1.0, 0
 
 
 def _boards(coll):
+    if coll is None:
+        return []
     return [o for o in coll.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")]
+
+
+def _session_boards(coll):
+    """deski sesji: z kolekcji + kazda z migawka (kolekcja usunieta / deski przeniesione)"""
+    out = _boards(coll)
+    seen = set(out)
+    out += [o for o in bpy.data.objects if o.get(SNAP) and o not in seen]
+    return out
 
 
 def _mw_list(m):
@@ -52,11 +62,17 @@ def snapshot(coll):
 
 def restore(coll):
     """deski jak przed podgladem; usuwa gwozdzie dodane przez Detale"""
-    boards = _boards(coll)
+    boards = _session_boards(coll)
     bset = set(boards)
     for ob in [ob for ob in bpy.data.objects if not ob.get("deski_gwozdz_staly")
                and ((ob.get("deski_gwozdz") and ob.parent in bset) or ob.get("deski_scen"))]:
         bpy.data.objects.remove(ob)
+    for ob in bpy.data.objects:                               # ukryte przez przeliczenie - wracaja
+        if ob.get("deski_ukryty"):
+            if ob.name in bpy.context.view_layer.objects:
+                ob.hide_set(False)
+            ob.hide_render = False
+            del ob["deski_ukryty"]
     for o in boards:
         d = o.get(SNAP)
         if not d:
@@ -81,15 +97,20 @@ def restore(coll):
 
 def forget(coll):
     """koniec sesji: zdejmij znaczniki; oryginaly, ktorych nikt juz nie uzywa, sa usuwane"""
+    for ob in [ob for ob in bpy.data.objects if ob.get("deski_ukryty")]:
+        bpy.data.objects.remove(ob)                          # stare gwozdzie / dno zastapione wynikiem
     for ob in bpy.data.objects:
         if ob.get("deski_gwozdz_staly"):
             del ob["deski_gwozdz_staly"]
-    for o in _boards(coll):
+    for o in _session_boards(coll):
         d = o.get(SNAP)
         if not d:
             continue
         del o[SNAP]
         me = bpy.data.meshes.get(json.loads(d)["mesh"])
+        od = o.get("deski_oryginal")
+        if me is not None and od and json.loads(od)["mesh"] == me.name:
+            continue                                         # to oryginal deski - zostaje (fake user)
         if me is not None:
             me.use_fake_user = False
             if me.users == 0:
@@ -123,6 +144,29 @@ def _set_hidden(names):
 def ghost_reset():
     """zapomnij pamiec szkicu (po cofnieciu / wczytaniu pliku odwolania do obiektow sa nieaktualne)"""
     _GH.update(core=None, key=None, sig=None)
+
+
+def _heal_later():
+    sc = bpy.context.scene
+    if sc is not None:
+        _state["running"] = True
+        try:
+            heal_session(sc)
+        finally:
+            _state["running"] = False
+    return None
+
+
+@persistent
+def _on_load(*args):
+    from .wyrwanie import purge_orphans
+    ghost_reset(); _GH["hidden"] = set(); _GH["meshes_dirty"] = False
+    for sc in bpy.data.scenes:
+        heal_session(sc)
+    if not any(getattr(sc, "deski_podglad", None) and sc.deski_podglad.active for sc in bpy.data.scenes):
+        n = purge_orphans()
+        if n:
+            print(f"Deski: usunieto {n} osieroconych kopii desek (z przerwanych sesji podgladu)")
 
 
 @persistent
@@ -214,14 +258,41 @@ def _draw_ghost():
     gpu.state.blend_set('NONE')
 
 
+# ---------------------------------------------------------------- sesja
+def end_session(scene, restore_boards=True, message=""):
+    """konczy podglad: przywraca deski (jesli trzeba), zdejmuje migawki, czysci szkic"""
+    pg = scene.deski_podglad
+    coll = pg.coll
+    ghost_clear()
+    if restore_boards:
+        restore(coll)
+    forget(coll)
+    pg.active = False; pg.coll = None; pg.message = message
+    _GH["meshes_dirty"] = False
+
+
+def heal_session(scene):
+    """podglad wlaczony, ale jego kolekcja desek zniknela (usunieta / podzial od nowa): zakoncz go czysto,
+    zamiast blokowac panel. Zwraca True, gdy sesja zostala zakonczona."""
+    pg = getattr(scene, "deski_podglad", None)
+    if pg is None or not pg.active or pg.coll is not None:
+        return False
+    end_session(scene, True, "Podgląd zakończony: kolekcja desek zniknęła (deski przywrócone)")
+    return True
+
+
 # ---------------------------------------------------------------- przeliczenie
 def compute(context, final=False):
     from . import wyrwanie, detale
     sc = context.scene
     pg, pw, pd = sc.deski_podglad, sc.deski_teren, sc.deski_detale
+    if heal_session(sc):
+        return
     coll = pg.coll or pw.boards                          # kolekcja zapamietana na starcie sesji
     if coll is None or (pw.terrain if pw.scenario == 'TEREN' else pw.emitter) is None:
-        pg.message = "Wskaz teren (albo obszar scenariusza) i kolekcje desek"; return
+        pg.message = ("Wskaż teren" if pw.scenario == 'TEREN' else "Wskaż obszar (Empty)") + " i kolekcję desek"
+        _set_hidden(set()); _GH.update(tris=None, lines=None)
+        return
     _state["running"] = True
     t0 = time.time()
     try:
@@ -301,6 +372,10 @@ def _on_depsgraph(scene, depsgraph):
     pg = getattr(scene, "deski_podglad", None)
     if not pg or not pg.active or _state["running"]:
         return
+    if pg.coll is None:                                      # kolekcja sesji usunieta - zakoncz czysto (poza handlerem)
+        if not bpy.app.timers.is_registered(_heal_later):
+            bpy.app.timers.register(_heal_later, first_interval=0.05)
+        return
     if time.time() - _state["last"] < 0.05:                  # zmiany wywolane przez samo przeliczenie
         return
     names = _watched(scene)
@@ -333,10 +408,12 @@ class DESKI_OT_live_start(bpy.types.Operator):
     def execute(self, context):
         from . import wyrwanie
         sc = context.scene; pw = sc.deski_teren; pg = sc.deski_podglad
+        heal_session(sc)
         coll = pw.boards
         if pw.remove_rigidbody:                               # raz, na starcie (tego Anuluj nie cofa)
             wyrwanie.remove_rigid_bodies(context, _boards(coll))
         n = snapshot(coll)
+        wyrwanie.reset_originals(context, _boards(coll))     # podglad zawsze od plaskich desek (Anuluj wraca do stanu sprzed)
         pg.coll = coll
         pg.active = True
         compute(context)
@@ -352,15 +429,19 @@ class DESKI_OT_live_accept(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.scene.deski_podglad.active
+        sc = context.scene; pg = sc.deski_podglad; pw = sc.deski_teren
+        src = pw.terrain if pw.scenario == 'TEREN' else pw.emitter
+        return pg.active and src is not None
 
     def execute(self, context):
         sc = context.scene; pg = sc.deski_podglad
+        if heal_session(sc):
+            self.report({'WARNING'}, pg.message); return {'CANCELLED'}
         ghost_clear()
         compute(context, final=True)
-        forget(pg.coll or sc.deski_teren.boards)
-        pg.active = False; pg.coll = None
-        self.report({'INFO'}, pg.message)
+        msg = pg.message
+        end_session(sc, restore_boards=False, message=msg)
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -375,12 +456,7 @@ class DESKI_OT_live_cancel(bpy.types.Operator):
         return context.scene.deski_podglad.active
 
     def execute(self, context):
-        sc = context.scene; pg = sc.deski_podglad
-        coll = pg.coll or sc.deski_teren.boards
-        ghost_clear()
-        restore(coll)
-        forget(coll)
-        pg.active = False; pg.message = ""; pg.coll = None
+        end_session(context.scene, True, "")
         return {'FINISHED'}
 
 
@@ -423,9 +499,11 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     if _on_frame not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame)
-    for lst in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post, bpy.app.handlers.load_post):
+    for lst in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
         if _on_undo not in lst:
             lst.append(_on_undo)
+    if _on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load)
     if not bpy.app.background:
         _GH["handler"] = bpy.types.SpaceView3D.draw_handler_add(_draw_ghost, (), 'WINDOW', 'POST_VIEW')
 
@@ -433,7 +511,7 @@ def register():
 def unregister():
     for h, lst in ((_on_depsgraph, bpy.app.handlers.depsgraph_update_post), (_on_frame, bpy.app.handlers.frame_change_post),
                    (_on_undo, bpy.app.handlers.undo_post), (_on_undo, bpy.app.handlers.redo_post),
-                   (_on_undo, bpy.app.handlers.load_post)):
+                   (_on_load, bpy.app.handlers.load_post)):
         if h in lst:
             lst.remove(h)
     if bpy.app.timers.is_registered(_tick):

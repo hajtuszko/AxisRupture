@@ -118,6 +118,7 @@ class DESKI_OT_animate(bpy.types.Operator):
             self.report({'ERROR'}, "Za krotki zakres klatek"); return {'CANCELLED'}
         boards_objs = [o for o in p.boards.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")
                        and not o.get(ORIG) and o.data.vertices]
+        wyrwanie.reset_originals(context, boards_objs)       # animacja od plaskich desek
         if p.remove_rigidbody:
             wyrwanie.remove_rigid_bodies(context, boards_objs)
         # teren animowany? (inaczej wynurza sie spod podlogi w zakresie klatek)

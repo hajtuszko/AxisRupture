@@ -67,21 +67,119 @@ def canon(nodes, ds):
     return out
 
 
+# ---------------------------------------------------------------- oryginaly desek
+# Kazde wyrwanie zaczyna od plaskiej deski sprzed pierwszego wyrwania - ponowne klikniecie (np. po zmianie
+# ustawien) nie liczy od poprzedniego wyniku. Oryginal: siatka (fake user), macierz, wlasciwosci deski_*.
+ORIG = "deski_oryginal"
+_KEEP = ("deski_oryginal", "deski_snap", "deski_anim_orig")
+
+
+def _mw_flat(m):
+    return [m[i][j] for i in range(4) for j in range(4)]
+
+
+def orig_of(o):
+    """(macierz, siatka) oryginalu deski albo biezace, gdy brak"""
+    import json
+    d = o.get(ORIG)
+    if d:
+        d = json.loads(d)
+        me = bpy.data.meshes.get(d["mesh"])
+        if me is not None:
+            return Matrix([d["mw"][i * 4:i * 4 + 4] for i in range(4)]), me
+    return o.matrix_world.copy(), o.data
+
+
+def remember_originals(objs):
+    """zapamietaj oryginal desek, ktore go jeszcze nie maja i nie byly ruszane przez dodatek"""
+    import json
+    for o in objs:
+        if o.get(ORIG) or o.get("deski_faza") or o.get("deski_detale") or o.get("deski_anim_orig"):
+            continue
+        if o.data.shape_keys:
+            continue
+        o.data.use_fake_user = True
+        props = {k: (o[k].to_list() if hasattr(o[k], "to_list") else o[k]) for k in o.keys()
+                 if k.startswith("deski_") and k not in _KEEP}
+        o[ORIG] = json.dumps({"mesh": o.data.name, "mw": _mw_flat(o.matrix_world), "props": props,
+                              "hide": [o.hide_get(), o.hide_render]})
+
+
+def reset_originals(context, objs):
+    """deski z powrotem w oryginalnym stanie; gwozdzie z Detali i dno scenariusza usuwane
+    (te sprzed podgladu na zywo tylko ukrywane - Anuluj je przywraca)"""
+    import json
+    objs = [o for o in objs if o.get(ORIG) and not o.get("deski_anim_orig")]
+    if not objs:
+        return 0
+    oset = set(objs)
+    for ob in [ob for ob in bpy.data.objects if (ob.get("deski_gwozdz") and ob.parent in oset) or ob.get("deski_scen")]:
+        if ob.get("deski_gwozdz_staly"):
+            if ob.name in context.view_layer.objects:
+                ob.hide_set(True)
+            ob.hide_render = True; ob["deski_ukryty"] = 1
+        else:
+            bpy.data.objects.remove(ob)
+    n = 0
+    for o in objs:
+        d = json.loads(o[ORIG])
+        me = bpy.data.meshes.get(d["mesh"])
+        if me is None:
+            continue
+        old = o.data
+        if old is not me:
+            o.data = me
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        o.matrix_world = Matrix([d["mw"][i * 4:i * 4 + 4] for i in range(4)])
+        if o.name in context.view_layer.objects:
+            o.hide_set(d["hide"][0])
+        o.hide_render = d["hide"][1]
+        for k in [k for k in o.keys() if k.startswith("deski_") and k not in _KEEP]:
+            del o[k]
+        for k, v in d["props"].items():
+            o[k] = v
+        n += 1
+    return n
+
+
+def purge_orphans():
+    """usuwa osierocone kopie desek z dodatku (fake user, nikt inny ich nie uzywa, zadna deska sie do nich
+    nie odwoluje jako oryginal / migawka) - zostaja np. po przerwanych sesjach podgladu"""
+    import json, re
+    refs = set()
+    for o in bpy.data.objects:
+        for k in ("deski_oryginal", "deski_snap", "deski_anim_orig"):
+            d = o.get(k)
+            if d:
+                try:
+                    refs.add(json.loads(d)["mesh"])
+                except (ValueError, KeyError):
+                    pass
+    pat = re.compile(r"_(Deska|Plytka|Cegla|Dachowka|Kostka|Kra)(\.\d+)?$")
+    dead = [m for m in bpy.data.meshes if m.use_fake_user and m.users == 1 and m.name not in refs and pat.search(m.name)]
+    for m in dead:
+        bpy.data.meshes.remove(m)
+    return len(dead)
+
+
 # ---------------------------------------------------------------- deska
 def board_sig(o):
-    """podpis deski do pamieci szkicu: polozenie i liczba wierzcholkow"""
-    return (tuple(round(x, 6) for r in o.matrix_world for x in r), len(o.data.vertices), o.data.name)
+    """podpis deski do pamieci szkicu: polozenie i liczba wierzcholkow (oryginalu, jesli zapamietany)"""
+    mw, me = orig_of(o)
+    return (tuple(round(x, 6) for r in mw for x in r), len(me.vertices), me.name)
 
 
 class Board:
-    def __init__(self, o):
+    def __init__(self, o, mw=None, me=None):
         self.o = o
-        mw = o.matrix_world
+        mw = o.matrix_world if mw is None else mw
+        self.mw0 = mw.copy()
         R = mw.to_3x3()
         axes = [R.col[k].copy() for k in range(3)]
         sc = [a.length for a in axes]
         axes = [a.normalized() for a in axes]
-        vs = [v.co for v in o.data.vertices]
+        vs = [v.co for v in (o.data if me is None else me).vertices]
         mn = Vector([min(v[k] for v in vs) for k in range(3)])
         mx = Vector([max(v[k] for v in vs) for k in range(3)])
         size = [(mx[k] - mn[k]) * sc[k] for k in range(3)]
@@ -115,7 +213,7 @@ class Board:
         self.tex_nails = []
         d = self.o.get("deski_gwozdzie_tex")
         if d:
-            mw = self.o.matrix_world
+            mw = self.mw0
             for i in range(0, len(d), 3):
                 q = self.Finv @ (mw @ Vector(d[i:i + 3]))
                 k = min(self.N - 1, max(1, int(round((q.x + self.L / 2) / self.ds))))
@@ -685,12 +783,13 @@ class DeformCore:
             if not (getattr(self, "keep_tb", False) and getattr(self, "TB", None) is not None):
                 self.terrain_bvh(context, terrain)
         elif p.emitter is None:
-            return 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
+            return None, 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
         boards, skipped = [], []
         for o in (boards_in if boards_in is not None else coll.all_objects):
             if o.type != 'MESH' or o == terrain or o == p.emitter or not o.data.vertices:
                 continue
-            if o.data.shape_keys:
+            mw0, me0 = orig_of(o)                      # zawsze od oryginalu (nie od poprzedniego wyniku)
+            if me0.shape_keys or o.data.shape_keys or o.get("deski_anim_orig"):
                 skipped.append(o.name + " (shape keys / animacja)"); continue
             bc = getattr(self, "board_cache", None)    # szkic: deski sie nie zmieniaja - uklad liczony raz
             b = bc.get(o.name) if bc is not None else None
@@ -704,9 +803,11 @@ class DeformCore:
                 else:
                     b = None
             if b is None:
-                b = Board(o)
+                b = Board(o, mw0, me0)
                 if not b.flat or b.T < 1e-4:
-                    skipped.append(o.name + (" (nie lezy plasko)" if not b.flat else " (brak grubosci)")); continue
+                    skipped.append(o.name + (" (nie lezy plasko - wyrwana wczesniej starsza wersja? 'Przywroc "
+                                             "oryginalne deski' nie zadziala bez oryginalu)" if not b.flat else " (brak grubosci)"))
+                    continue
                 b.setup(p.segment_length, p.nail_position)
                 if bc is not None:
                     b.sig = board_sig(o)
@@ -726,8 +827,9 @@ class DeformCore:
             moved = [b for b in boards if scenariusze.simulate_void(self, b, p, self.F)]
         self.moved = [b.o for b in moved]
         if not moved:
-            return None, 'WARNING', ("Teren nie dochodzi do zadnej deski" if scen == 'TEREN' else
-                                     "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)")
+            if scen == 'TEREN':
+                return None, 'WARNING', terrain_hint(context, terrain, boards)
+            return None, 'WARNING', "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)"
         EPS = self._eps = p.clearance
         thrown = [b for b in moved if b.phase == 4]
         moved = [b for b in moved if b.phase != 4]
@@ -777,6 +879,10 @@ class DeformCore:
 
     def run(self, context, p, remove_rigidbody=True):
         """caly etap 1; zwraca (poziom 'INFO'/'WARNING'/'ERROR', komunikat)"""
+        if p.boards is not None:                       # zawsze od oryginalnych desek
+            objs = [o for o in p.boards.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")]
+            reset_originals(context, objs)
+            remember_originals(objs)
         res = self.solve(context, p)
         if res[0] is None:
             return res[1], res[2]
@@ -838,6 +944,40 @@ class DeformCore:
         return ('WARNING' if (skipped or (p.verify and (bad or tbad))) else 'INFO'), msg
 
 
+def _bbox_xy(pts):
+    xs = [q.x for q in pts]; ys = [q.y for q in pts]
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def terrain_hint(context, terrain, boards):
+    """dlaczego teren niczego nie ruszyl: lezy obok desek albo pod podloga; podpowiedz obiekt pod deskami"""
+    bb = _bbox_xy([b.o.matrix_world @ Vector(c) for b in boards for c in b.o.bound_box])
+    z0 = min(b.z0 for b in boards)
+    tp = [terrain.matrix_world @ Vector(c) for c in terrain.bound_box]
+    tb = _bbox_xy(tp)
+    ov = bb[0] < tb[1] and tb[0] < bb[1] and bb[2] < tb[3] and tb[2] < bb[3]
+    if ov:
+        return (f"Teren '{terrain.name}' lezy pod deskami, ale nie siega ponad podloge (najwyzej z={max(q.z for q in tp):.2f}, "
+                f"podloga z={z0:.2f}) - podnies teren albo przesun go w gore")
+    board_objs = {b.o for b in boards}
+    cands = []
+    for o in context.scene.objects:
+        if o.type != 'MESH' or o in board_objs or o == terrain:
+            continue
+        pts = [o.matrix_world @ Vector(c) for c in o.bound_box]
+        ob = _bbox_xy(pts)
+        relief = max(q.z for q in pts) - min(q.z for q in pts)        # teren ma rzezbe (plaszczyzny pomijamy)
+        if bb[0] < ob[1] and ob[0] < bb[1] and bb[2] < ob[3] and ob[2] < bb[3] and max(q.z for q in pts) > z0 + 0.01                 and relief > 0.05:
+            area = (min(bb[1], ob[1]) - max(bb[0], ob[0])) * (min(bb[3], ob[3]) - max(bb[2], ob[2]))
+            cands.append((area, o.name))
+    cands.sort(reverse=True)
+    msg = (f"Teren '{terrain.name}' nie lezy pod deskami (deski: x {bb[0]:.1f}..{bb[1]:.1f}, y {bb[2]:.1f}..{bb[3]:.1f}; "
+           f"teren: x {tb[0]:.1f}..{tb[1]:.1f}, y {tb[2]:.1f}..{tb[3]:.1f})")
+    if cands:
+        msg += " - pod deskami jest: " + ", ".join(n for _, n in cands[:3])
+    return msg
+
+
 def remove_rigid_bodies(context, objs):
     """usun Rigid Body (inaczej symulacja nadpisze ulozenie); dziala tez poza operatorem"""
     vl = context.view_layer
@@ -847,6 +987,28 @@ def remove_rigid_bodies(context, objs):
             with context.temp_override(object=o, active_object=o, selected_objects=[o]):
                 bpy.ops.rigidbody.object_remove()
             o.hide_set(hs)
+
+
+class DESKI_OT_reset(bpy.types.Operator):
+    bl_idname = "object.deski_przywroc"
+    bl_label = "Przywróć oryginalne deski"
+    bl_description = "Cofa wyrwanie i detale: deski jak przed pierwszym wyrwaniem (gwozdzie i dno usuwane)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.deski_teren
+        pg = getattr(context.scene, "deski_podglad", None)
+        return p.boards is not None and not (pg and pg.active)
+
+    def execute(self, context):
+        objs = [o for o in context.scene.deski_teren.boards.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")]
+        n = reset_originals(context, objs)
+        k = purge_orphans()
+        self.report({'INFO'} if n else {'WARNING'}, (f"Przywrocono {n} desek" if n else
+                    "Brak zapamietanych oryginalow (deski nie byly wyrywane ta wersja dodatku)")
+                    + (f"; usunieto {k} osieroconych kopii desek" if k else ""))
+        return {'FINISHED'}
 
 
 class DESKI_OT_deform(DeformCore, bpy.types.Operator):
@@ -963,7 +1125,7 @@ class DeskiSettings(bpy.types.PropertyGroup):
 add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))
 
 
-classes = (DeskiSettings, DESKI_OT_deform)
+classes = (DeskiSettings, DESKI_OT_deform, DESKI_OT_reset)
 
 
 def register():

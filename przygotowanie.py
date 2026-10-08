@@ -380,7 +380,44 @@ def herring_layout(src, grid, model, size):
     return {key: (r, jd.along_uv(lat, size, *r, field=field)) for key, r in boards.items()}
 
 
-_CACHE = {}                                            # analiza tekstur - wspolna dla podzialu i podgladu
+def result_collection(context, name, src_name, replace):
+    """kolekcja wyniku: przy 'Zastap poprzedni wynik' poprzednia kolekcja tej samej plaszczyzny jest
+    oprozniana i uzywana ponownie (zamiast '.001' nakladajacego sie na stary wynik)"""
+    def ours(c):                                          # wynik tej plaszczyzny (oznaczony albo po nazwach obiektow)
+        if c.get("deski_wynik") == src_name:
+            return True
+        obs = [o for o in c.objects if not o.get("deski_gwozdz")]
+        return bool(obs) and all(o.name.startswith(src_name + "_") for o in obs)
+    cands = [c for c in bpy.data.collections if (c.name == name or c.name.startswith(name + ".")) and ours(c)]
+    cands.sort(key=lambda c: (c.name != name, c.name))
+    old = cands[0] if cands else None
+    if replace and old is not None:
+        old["deski_wynik"] = src_name
+        pg = getattr(context.scene, "deski_podglad", None)
+        if pg is not None and pg.active and pg.coll == old:
+            from . import podglad
+            podglad.end_session(context.scene, True, "")
+        objs = set(old.all_objects)
+        for ob in [ob for ob in bpy.data.objects if ob.parent in objs and ob not in objs]:
+            bpy.data.objects.remove(ob)                   # gwozdzie itp. przypiete do starych elementow
+        for ob in list(objs):
+            me = ob.data if ob.type == 'MESH' else None
+            bpy.data.objects.remove(ob)
+            if me is not None and me.users == 0:
+                bpy.data.meshes.remove(me)
+        from .wyrwanie import purge_orphans
+        purge_orphans()
+        if old.name not in context.scene.collection.children and not old.users:
+            context.scene.collection.children.link(old)
+        return old
+    out = bpy.data.collections.new(name)
+    context.scene.collection.children.link(out)
+    out["deski_wynik"] = src_name
+    return out
+
+
+_CACHE = {}
+_SKIP = {"n": 0, "w": 0.0}                              # kawalki odrzucone jako wezsze niz 'Min. kawalek'                                            # analiza tekstur - wspolna dla podzialu i podgladu
 
 
 def _img_key(img):
@@ -873,10 +910,10 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         src_objs = [o for o in (p.source,) if o and o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
         if not src_objs:
             return 'ERROR', "Wskaz plaszczyzne (siatka z UV i tekstura desek)"
-        out = bpy.data.collections.new(p.output_name or (p.source.name + " - deski"))
-        context.scene.collection.children.link(out)
+        out = result_collection(context, p.output_name or (p.source.name + " - deski"), p.source.name, p.replace_output)
         total, msgs = 0, []
         cache = _CACHE
+        _SKIP.update(n=0, w=0.0)
         ns = len(src_objs)
         for si, src in enumerate(src_objs):
             lo, mid, hi = si / ns, (si + 0.85) / ns, (si + 1) / ns        # analiza tekstury trwa najdluzej
@@ -925,6 +962,10 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                 src.hide_set(True); src.hide_render = True
         for m in msgs:
             print("Przygotowanie desek -", m)
+        if _SKIP["n"]:
+            msgs.append(f"pominieto {_SKIP['n']} kawalkow wezszych niz 'Min. kawalek' ({p.min_piece * 100:.1f} cm; "
+                        f"najszerszy pominiety {_SKIP['w'] * 100:.1f} cm)"
+                        + (" - zmniejsz 'Min. kawalek' w Wymiarach desek" if not total else ""))
         return ('INFO' if total else 'WARNING'), f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs)
 
     def split_stones(self, src, out, polys, p):
@@ -1168,6 +1209,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         vs = [v.co for v in bm.verts]
         ext = sorted((max(c[k] for c in vs) - min(c[k] for c in vs)) for k in range(3))
         if ext[1] < p.min_piece:
+            _SKIP["n"] += 1; _SKIP["w"] = max(_SKIP["w"], ext[1])
             bm.free(); return None
         top = bm.faces[:]
         if p.thickness > 0:
@@ -1351,6 +1393,9 @@ class DeskiPrepSettings(bpy.types.PropertyGroup):
     min_piece: bpy.props.FloatProperty(name="Min. kawalek", default=0.02, min=0.0, unit='LENGTH',
                                        description="Pomijaj drzazgi wezsze niz tyle (przy brzegach plaszczyzny)")
     hide_source: bpy.props.BoolProperty(name="Ukryj plaszczyzne zrodlowa", default=True)
+    replace_output: bpy.props.BoolProperty(name="Zastąp poprzedni wynik", default=True,
+                                           description="Ponowny podzial tej samej plaszczyzny zastepuje poprzednie elementy "
+                                                       "(zamiast tworzyc nowa kolekcje '.001' na starych)")
     detect_nails: bpy.props.BoolProperty(name="Wykrywaj gwozdzie", default=True,
                                          description="Lebki gwozdzi z tekstury koloru (ciemne, chlodne punkty parami przy "
                                                      "krawedziach deski) - uzywane przy wyrywaniu i w detalach")

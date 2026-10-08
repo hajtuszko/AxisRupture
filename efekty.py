@@ -144,8 +144,8 @@ class DESKI_OT_ice(bpy.types.Operator):
                 if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
                     seeds.append((x, y))
         cells = voronoi_cells(seeds, rect, e.ice_gap)
-        out = bpy.data.collections.new(e.ice_output or (src.name + " - kry"))
-        context.scene.collection.children.link(out)
+        from .przygotowanie import result_collection
+        out = result_collection(context, e.ice_output or (src.name + " - kry"), src.name, e.ice_replace)
         P = _P(thickness=e.ice_thickness, chamfer=e.ice_chamfer, min_piece=0.01, surface="LOD")
         pieces = []
         for idx, cell in enumerate(cells):
@@ -185,7 +185,8 @@ class DESKI_OT_ice(bpy.types.Operator):
                         - src.matrix_world @ f3(0, 0)).normalized() if d > 1e-6 else n.orthogonal()
                 axis = n.cross(wdir).normalized()
                 ang = -math.radians(e.ice_tilt) * s * rng.uniform(0.4, 1.0)
-                sink = e.ice_sink * s * rng.uniform(0.6, 1.0)
+                # kry plywaja: zapadniecie najwyzej o grubosc lodu (glebiej = znikaja pod woda)
+                sink = min(e.ice_sink, 0.9 * e.ice_thickness) * s * rng.uniform(0.6, 1.0)
             else:
                 s = 0.0; axis = n.orthogonal().normalized(); ang = 0.0; sink = 0.0
             # lekkie kolysanie wszystkich kry (plywaja)
@@ -216,7 +217,9 @@ class DESKI_OT_ice(bpy.types.Operator):
         if e.ice_water:
             self.water(context, src, n, e)
         src.hide_set(True); src.hide_render = True
-        self.report({'INFO'}, f"Kry: {len(objs)} (przerebel: {removed} usunietych, dociśniete w kolizjach: {pushed})")
+        note = (f"; zapadniecie ograniczone do grubosci lodu ({e.ice_thickness * 100:.1f} cm) - kry plywaja"
+                if e.ice_sink > 0.9 * e.ice_thickness else "")
+        self.report({'INFO'}, f"Kry: {len(objs)} (przerebel: {removed} usunietych, dociśniete w kolizjach: {pushed}){note}")
         return {'FINISHED'}
 
     def water(self, context, src, n, e):
@@ -400,6 +403,8 @@ class DeskiEffectsSettings(bpy.types.PropertyGroup):
                                       description="Kry blizej srodka niz tyle (czesc promienia) sa usuwane - otwarta woda")
     ice_bob: bpy.props.FloatProperty(name="Kołysanie (°)", default=1.0, min=0.0, max=10.0,
                                      description="Drobny losowy przechyl wszystkich kry (plywaja)")
+    ice_replace: bpy.props.BoolProperty(name="Zastąp poprzedni wynik", default=True,
+                                        description="Ponowne rozbicie zastepuje poprzednie kry tej plyty")
     ice_water: bpy.props.BoolProperty(name="Dodaj wodę", default=True,
                                       description="Plaszczyzna wody pod lodem (bez materialu - przypisz swoj)")
     ice_seed: bpy.props.IntProperty(name="Seed", default=7)
