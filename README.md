@@ -4,6 +4,10 @@ Texture-aware destruction for Blender. Axis Rupture reads the seams in your plan
 cuts the plane into real pieces along them, then bends, tears and breaks those pieces with a terrain or a scenario.
 The output stays game-ready: UVs preserved, no n-gons, extra loops only where a piece actually bends.
 
+![Axis Rupture: seams detected on straight planks and herringbone parquet, the planes split into separate pieces, then torn up by terrain](media/axis-rupture-demo.gif)
+
+*Demo: straight planks (174) and herringbone parquet (405 blocks) detected from the texture maps, split, then torn up by a terrain mesh rising from below. Rendered in Blender 5.0 (Cycles) with Quixel Megascans surfaces used under licence.*
+
 ## What it does
 
 **1. Prepare: split along texture seams**
