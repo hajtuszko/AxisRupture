@@ -92,10 +92,10 @@ def _rigid_matrix(b, st, mw):
 
 # ---------------------------------------------------------------- operator
 class DESKI_OT_animate(bpy.types.Operator):
-    bl_idname = "object.deski_animuj"
-    bl_label = "Animuj wyrywanie"
-    bl_description = ("Animacja etapu 1 w zakresie klatek sceny: teren (animowany albo wynurzajacy sie) / "
-                      "narastajacy scenariusz wygina i wyrywa deski klatka po klatce")
+    bl_idname = "object.axis_rupture_animuj"
+    bl_label = "Animate Tearing"
+    bl_description = ("Animates stage 1 over the scene frame range: the terrain (animated or rising) / "
+                      "a growing scenario bends and tears the planks frame by frame")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -115,7 +115,7 @@ class DESKI_OT_animate(bpy.types.Operator):
         if frames[-1] != fe:
             frames.append(fe)
         if len(frames) < 2:
-            self.report({'ERROR'}, "Za krotki zakres klatek"); return {'CANCELLED'}
+            self.report({'ERROR'}, "Frame range too short"); return {'CANCELLED'}
         boards_objs = [o for o in p.boards.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")
                        and not o.get(ORIG) and o.data.vertices]
         wyrwanie.reset_originals(context, boards_objs)       # animacja od plaskich desek
@@ -239,13 +239,13 @@ class DESKI_OT_animate(bpy.types.Operator):
                     self.fly(o, b, mw, frames[i_throw - 1] if i_throw > 0 else frames[0], p, bent)
                     n_thrown += 1
                 last = next((st for st in reversed(live) if st), None)
-                o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana", "wyrzucona")[
+                o["deski_faza"] = ("przybita", "single nail", "wyrwana", "wyrzucona")[
                     (4 if i_throw is not None else (last["phase"] if last else 1)) - 1]
         finally:
             prefs.keyframe_new_interpolation_type = old_interp
-        self.report({'INFO'}, f"Animacja {fs}-{fe} (co {step} kl., probek {len(frames)}): sztywne {n_rigid}, "
-                              f"wyginane (shape keys) {n_bent}, wyrzucone {n_thrown}"
-                              + (", teren animowany" if t_anim else ""))
+        self.report({'INFO'}, f"Animation {fs}-{fe} (every {step} fr., samples {len(frames)}): rigid {n_rigid}, "
+                              f"bent (shape keys) {n_bent}, ejected {n_thrown}"
+                              + (", animated terrain" if t_anim else ""))
         return {'FINISHED'}
 
     # --- deska wyginana: wspolna topologia + absolutne shape keys
@@ -335,9 +335,9 @@ class DESKI_OT_animate(bpy.types.Operator):
 
 
 class DESKI_OT_animate_clear(bpy.types.Operator):
-    bl_idname = "object.deski_animuj_usun"
-    bl_label = "Usuń animację"
-    bl_description = "Przywraca deski sprzed animacji (siatki, polozenie) i usuwa klucze"
+    bl_idname = "object.axis_rupture_animuj_usun"
+    bl_label = "Remove Animation"
+    bl_description = "Restores the planks from before the animation (meshes, transforms) and removes the keys"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -386,7 +386,7 @@ class DESKI_OT_animate_clear(bpy.types.Operator):
             for k in [k for k in o.keys() if k.startswith("deski_") and k not in ("deski_gwozdzie_tex",)]:
                 del o[k]
             n += 1
-        self.report({'INFO'}, f"Przywrocono {n} desek")
+        self.report({'INFO'}, f"Restored {n} planks")
         return {'FINISHED'}
 
 

@@ -174,7 +174,7 @@ def build_ground(context, p, F, coll):
     """dno dziury / krateru jako siatka (ten sam ksztalt, o ktory opieraja sie deski). Obiekt
     '<kolekcja> - dno' jest tworzony raz i podmieniany przy kolejnych przeliczeniach."""
     import bpy, bmesh
-    name = coll.name + " - dno"
+    name = coll.name + " - bottom"
     n = 48
     bm = bmesh.new()
     M = p.emitter.matrix_world

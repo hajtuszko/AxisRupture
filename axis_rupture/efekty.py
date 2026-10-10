@@ -87,10 +87,10 @@ class _P:
 
 # ================================================================ pekajacy lod
 class DESKI_OT_ice(bpy.types.Operator):
-    bl_idname = "object.deski_lod"
-    bl_label = "Rozbij lód"
-    bl_description = ("Dzieli plyte lodu na kry (Voronoi): wokol punktu uderzenia promieniste odlamki, "
-                      "dalej wieksze kry; kry przechylone i zapadniete wg odleglosci od uderzenia")
+    bl_idname = "object.axis_rupture_lod"
+    bl_label = "Break Ice"
+    bl_description = ("Splits an ice sheet into floes (Voronoi): radial shards around the impact point, "
+                      "bigger floes further out; floes tilt and sink by distance from the impact")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -104,7 +104,7 @@ class DESKI_OT_ice(bpy.types.Operator):
         src = e.ice_source
         faces = plane_affine(src)
         if not faces:
-            self.report({'ERROR'}, "Plaszczyzna lodu musi miec UV"); return {'CANCELLED'}
+            self.report({'ERROR'}, "The ice plane needs UVs"); return {'CANCELLED'}
         rng = random.Random(e.ice_seed)
         f3 = faces[0][1]
         sc_w = max(src.matrix_world.to_scale())
@@ -145,7 +145,7 @@ class DESKI_OT_ice(bpy.types.Operator):
                     seeds.append((x, y))
         cells = voronoi_cells(seeds, rect, e.ice_gap)
         from .przygotowanie import result_collection
-        out = result_collection(context, e.ice_output or (src.name + " - kry"), src.name, e.ice_replace)
+        out = result_collection(context, e.ice_output or (src.name + " - floes"), src.name, e.ice_replace)
         P = _P(thickness=e.ice_thickness, chamfer=e.ice_chamfer, min_piece=0.01, surface="LOD")
         pieces = []
         for idx, cell in enumerate(cells):
@@ -217,13 +217,13 @@ class DESKI_OT_ice(bpy.types.Operator):
         if e.ice_water:
             self.water(context, src, n, e)
         src.hide_set(True); src.hide_render = True
-        note = (f"; zapadniecie ograniczone do grubosci lodu ({e.ice_thickness * 100:.1f} cm) - kry plywaja"
+        note = (f"; sinking limited to the ice thickness ({e.ice_thickness * 100:.1f} cm) - the floes float"
                 if e.ice_sink > 0.9 * e.ice_thickness else "")
-        self.report({'INFO'}, f"Kry: {len(objs)} (przerebel: {removed} usunietych, dociśniete w kolizjach: {pushed}){note}")
+        self.report({'INFO'}, f"Floes: {len(objs)} (ice hole: {removed} removed, pushed apart in collisions: {pushed}){note}")
         return {'FINISHED'}
 
     def water(self, context, src, n, e):
-        name = src.name + " - woda"
+        name = src.name + " - water"
         old = bpy.data.objects.get(name)
         if old:
             bpy.data.objects.remove(old)
@@ -274,10 +274,10 @@ def _table_at(tab, s):
 
 
 class DESKI_OT_carpet(bpy.types.Operator):
-    bl_idname = "object.deski_wykladzina"
-    bl_label = "Odklej wykładzinę"
-    bl_description = ("Odkleja wykladzine / linoleum / tapete od strony Empty: zwoj, zagiecie albo pecherz. "
-                      "Wynik: kopia '<nazwa>_odklejona' z modyfikatorem grubosci (Solidify)")
+    bl_idname = "object.axis_rupture_wykladzina"
+    bl_label = "Peel Carpet"
+    bl_description = ("Peels carpet / linoleum / wallpaper from the Empty side: roll, fold or bubble. "
+                      "Result: a copy '<name>_peeled' with a thickness modifier (Solidify)")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -290,7 +290,7 @@ class DESKI_OT_carpet(bpy.types.Operator):
         from .przygotowanie import src_normal
         e = context.scene.deski_efekty
         src, hd = e.carpet_source, e.carpet_handle
-        name = src.name + "_odklejona"
+        name = src.name + "_peeled"
         me = src.data.copy(); me.name = name
         ob = bpy.data.objects.get(name)
         if ob is None:
@@ -375,62 +375,62 @@ class DESKI_OT_carpet(bpy.types.Operator):
         bm.normal_update()
         bm.to_mesh(me); bm.free(); me.update()
         # grubosc: Solidify (nie niszczy - do nalozenia przy eksporcie)
-        mod = ob.modifiers.get("Deski_grubosc") or ob.modifiers.new("Deski_grubosc", 'SOLIDIFY')
+        mod = ob.modifiers.get("AxisRupture_Thickness") or ob.modifiers.new("AxisRupture_Thickness", 'SOLIDIFY')
         mod.thickness = e.carpet_thickness; mod.offset = 1.0; mod.use_even_offset = True
         mod.use_quality_normals = True
         src.hide_set(True); src.hide_render = True
         ob["deski_efekt"] = "wykladzina"
-        self.report({'INFO'}, f"Odklejono '{src.name}' ({mode.lower()}): {len(me.polygons)} scian (bez grubosci)")
+        self.report({'INFO'}, f"Peeled '{src.name}' ({mode.lower()}): {len(me.polygons)} faces (no thickness)")
         return {'FINISHED'}
 
 
 # ================================================================ ustawienia
 class DeskiEffectsSettings(bpy.types.PropertyGroup):
-    ice_source: bpy.props.PointerProperty(name="Płyta lodu", type=bpy.types.Object,
+    ice_source: bpy.props.PointerProperty(name="Ice Sheet", type=bpy.types.Object,
                                           poll=lambda s, o: o.type == 'MESH' and len(o.data.uv_layers) > 0)
-    ice_impact: bpy.props.PointerProperty(name="Uderzenie", type=bpy.types.Object,
-                                          description="Empty w miejscu uderzenia (puste = rownomierne kry)")
-    ice_output: bpy.props.StringProperty(name="Kolekcja wynikowa", default="")
-    ice_radius: bpy.props.FloatProperty(name="Promień uderzenia", default=1.2, min=0.05, unit='LENGTH')
-    ice_floe: bpy.props.FloatProperty(name="Rozmiar kry", default=0.6, min=0.05, unit='LENGTH',
-                                      description="Typowa wielkosc kry poza strefa uderzenia (mniej = wiecej elementow)")
-    ice_thickness: bpy.props.FloatProperty(name="Grubość", default=0.05, min=0.001, unit='LENGTH')
-    ice_gap: bpy.props.FloatProperty(name="Szerokość pęknięć", default=0.006, min=0.0, unit='LENGTH')
-    ice_chamfer: bpy.props.FloatProperty(name="Faza", default=0.004, min=0.0, unit='LENGTH')
-    ice_tilt: bpy.props.FloatProperty(name="Maks. przechył (°)", default=14.0, min=0.0, max=60.0)
-    ice_sink: bpy.props.FloatProperty(name="Zapadnięcie", default=0.04, min=0.0, unit='LENGTH')
-    ice_hole: bpy.props.FloatProperty(name="Przerębel", default=0.12, min=0.0, max=0.9, subtype='FACTOR',
-                                      description="Kry blizej srodka niz tyle (czesc promienia) sa usuwane - otwarta woda")
-    ice_bob: bpy.props.FloatProperty(name="Kołysanie (°)", default=1.0, min=0.0, max=10.0,
-                                     description="Drobny losowy przechyl wszystkich kry (plywaja)")
-    ice_replace: bpy.props.BoolProperty(name="Zastąp poprzedni wynik", default=True,
-                                        description="Ponowne rozbicie zastepuje poprzednie kry tej plyty")
-    ice_water: bpy.props.BoolProperty(name="Dodaj wodę", default=True,
-                                      description="Plaszczyzna wody pod lodem (bez materialu - przypisz swoj)")
+    ice_impact: bpy.props.PointerProperty(name="Impact", type=bpy.types.Object,
+                                          description="Empty at the impact point (empty = even floes)")
+    ice_output: bpy.props.StringProperty(name="Output Collection", default="")
+    ice_radius: bpy.props.FloatProperty(name="Impact Radius", default=1.2, min=0.05, unit='LENGTH')
+    ice_floe: bpy.props.FloatProperty(name="Floe Size", default=0.6, min=0.05, unit='LENGTH',
+                                      description="Typical floe size outside the impact zone (lower = more pieces)")
+    ice_thickness: bpy.props.FloatProperty(name="Thickness", default=0.05, min=0.001, unit='LENGTH')
+    ice_gap: bpy.props.FloatProperty(name="Crack Width", default=0.006, min=0.0, unit='LENGTH')
+    ice_chamfer: bpy.props.FloatProperty(name="Bevel", default=0.004, min=0.0, unit='LENGTH')
+    ice_tilt: bpy.props.FloatProperty(name="Max. Tilt (°)", default=14.0, min=0.0, max=60.0)
+    ice_sink: bpy.props.FloatProperty(name="Sinking", default=0.04, min=0.0, unit='LENGTH')
+    ice_hole: bpy.props.FloatProperty(name="Ice Hole", default=0.12, min=0.0, max=0.9, subtype='FACTOR',
+                                      description="Floes closer to the center than this (fraction of the radius) are removed - open water")
+    ice_bob: bpy.props.FloatProperty(name="Rocking (°)", default=1.0, min=0.0, max=10.0,
+                                     description="Small random tilt of all floes (they float)")
+    ice_replace: bpy.props.BoolProperty(name="Replace Previous Result", default=True,
+                                        description="Breaking again replaces the previous floes of this sheet")
+    ice_water: bpy.props.BoolProperty(name="Add Water", default=True,
+                                      description="Water plane under the ice (no material - assign your own)")
     ice_seed: bpy.props.IntProperty(name="Seed", default=7)
-    carpet_source: bpy.props.PointerProperty(name="Wykładzina", type=bpy.types.Object,
+    carpet_source: bpy.props.PointerProperty(name="Carpet", type=bpy.types.Object,
                                              poll=lambda s, o: o.type == 'MESH' and len(o.data.uv_layers) > 0,
-                                             description="Plaszczyzna wykladziny / linoleum / tapety (z UV)")
-    carpet_handle: bpy.props.PointerProperty(name="Odklejanie od", type=bpy.types.Object,
-                                             description="Empty przy krawedzi / w rogu: stad wykladzina sie odkleja "
-                                                         "(kierunek - do srodka plaszczyzny); dla pecherza - jego srodek")
-    carpet_mode: bpy.props.EnumProperty(name="Rodzaj", default='ZAGIECIE', items=(
-        ('ZAGIECIE', "Zagięcie", "Odchylony plat z lukiem przy linii odklejenia", 'MOD_CURVE', 0),
-        ('ZWOJ', "Zwój", "Zrolowana wykladzina (spirala)", 'MOD_SCREW', 1),
-        ('PECHERZ', "Pęcherz", "Wybrzuszenie w srodku (bez odklejonej krawedzi)", 'SPHERE', 2)))
-    carpet_length: bpy.props.FloatProperty(name="Długość odklejenia", default=0.45, min=0.01, unit='LENGTH',
-                                           description="Jak daleko od krawedzi wykladzina jest odklejona")
-    carpet_radius: bpy.props.FloatProperty(name="Promień zgięcia / zwoju", default=0.05, min=0.002, unit='LENGTH')
-    carpet_angle: bpy.props.FloatProperty(name="Kąt płata (°)", default=70.0, min=0.0, max=170.0)
-    carpet_curl: bpy.props.FloatProperty(name="Podwinięcie końca", default=0.3, min=0.0, max=3.0,
-                                         description="Dodatkowe zawiniecie wolnego konca plata")
-    carpet_noise: bpy.props.FloatProperty(name="Nierówność linii", default=0.12, min=0.0, max=0.6, subtype='FACTOR')
-    carpet_wrinkle: bpy.props.FloatProperty(name="Fałdy", default=0.004, min=0.0, unit='LENGTH')
-    carpet_bubble: bpy.props.FloatProperty(name="Promień pęcherza", default=0.35, min=0.02, unit='LENGTH')
-    carpet_bubble_h: bpy.props.FloatProperty(name="Wysokość pęcherza", default=0.04, min=0.0, unit='LENGTH')
-    carpet_thickness: bpy.props.FloatProperty(name="Grubość", default=0.006, min=0.0005, unit='LENGTH')
-    carpet_seg: bpy.props.FloatProperty(name="Gęstość pętli", default=0.012, min=0.002, unit='LENGTH',
-                                        description="Odstep petli w strefie odklejenia (mniej = gladszy luk, wiecej scian)")
+                                             description="Carpet / linoleum / wallpaper plane (with UVs)")
+    carpet_handle: bpy.props.PointerProperty(name="Peel From", type=bpy.types.Object,
+                                             description="Empty at an edge / in a corner: the carpet peels from here "
+                                                         "(direction - toward the plane center); for a bubble - its center")
+    carpet_mode: bpy.props.EnumProperty(name="Type", default='ZAGIECIE', items=(
+        ('ZAGIECIE', "Fold", "Lifted flap with an arc at the peel line", 'MOD_CURVE', 0),
+        ('ZWOJ', "Roll", "Rolled-up carpet (spiral)", 'MOD_SCREW', 1),
+        ('PECHERZ', "Bubble", "Bulge in the middle (no peeled edge)", 'SPHERE', 2)))
+    carpet_length: bpy.props.FloatProperty(name="Peel Length", default=0.45, min=0.01, unit='LENGTH',
+                                           description="How far from the edge the carpet is peeled")
+    carpet_radius: bpy.props.FloatProperty(name="Fold / Roll Radius", default=0.05, min=0.002, unit='LENGTH')
+    carpet_angle: bpy.props.FloatProperty(name="Flap Angle (°)", default=70.0, min=0.0, max=170.0)
+    carpet_curl: bpy.props.FloatProperty(name="End Curl", default=0.3, min=0.0, max=3.0,
+                                         description="Extra curl of the flap's free end")
+    carpet_noise: bpy.props.FloatProperty(name="Line Irregularity", default=0.12, min=0.0, max=0.6, subtype='FACTOR')
+    carpet_wrinkle: bpy.props.FloatProperty(name="Folds", default=0.004, min=0.0, unit='LENGTH')
+    carpet_bubble: bpy.props.FloatProperty(name="Bubble Radius", default=0.35, min=0.02, unit='LENGTH')
+    carpet_bubble_h: bpy.props.FloatProperty(name="Bubble Height", default=0.04, min=0.0, unit='LENGTH')
+    carpet_thickness: bpy.props.FloatProperty(name="Thickness", default=0.006, min=0.0005, unit='LENGTH')
+    carpet_seg: bpy.props.FloatProperty(name="Loop Density", default=0.012, min=0.002, unit='LENGTH',
+                                        description="Loop spacing in the peel zone (lower = smoother arc, more faces)")
     carpet_seed: bpy.props.IntProperty(name="Seed", default=3)
 
 

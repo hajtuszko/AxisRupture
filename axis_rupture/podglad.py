@@ -166,7 +166,7 @@ def _on_load(*args):
     if not any(getattr(sc, "deski_podglad", None) and sc.deski_podglad.active for sc in bpy.data.scenes):
         n = purge_orphans()
         if n:
-            print(f"Deski: usunieto {n} osieroconych kopii desek (z przerwanych sesji podgladu)")
+            print(f"Planks: removed {n} orphaned plank copies (from interrupted preview sessions)")
 
 
 @persistent
@@ -232,8 +232,8 @@ def ghost_compute(context, coll):
     cnt = {1: 0, 2: 0, 3: 0}
     for b in moved:
         cnt[min(b.phase, 3)] += 1
-    msg = (f"przybite {cnt[1]} · luźne {cnt[2]} · wyrwane {cnt[3]} | "
-           + (f"wyrzucone {len(thrown)}, " if thrown else "") + f"nietknięte {len(boards) - len(moved) - len(thrown)}")
+    msg = (f"nailed {cnt[1]} · loose {cnt[2]} · torn {cnt[3]} | "
+           + (f"wyrzucone {len(thrown)}, " if thrown else "") + f"intact {len(boards) - len(moved) - len(thrown)}")
     return msg
 
 
@@ -277,7 +277,7 @@ def heal_session(scene):
     pg = getattr(scene, "deski_podglad", None)
     if pg is None or not pg.active or pg.coll is not None:
         return False
-    end_session(scene, True, "Podgląd zakończony: kolekcja desek zniknęła (deski przywrócone)")
+    end_session(scene, True, "Preview ended: the plank collection is gone (planks restored)")
     return True
 
 
@@ -290,7 +290,7 @@ def compute(context, final=False):
         return
     coll = pg.coll or pw.boards                          # kolekcja zapamietana na starcie sesji
     if coll is None or (pw.terrain if pw.scenario == 'TEREN' else pw.emitter) is None:
-        pg.message = ("Wskaż teren" if pw.scenario == 'TEREN' else "Wskaż obszar (Empty)") + " i kolekcję desek"
+        pg.message = ("Pick the terrain" if pw.scenario == 'TEREN' else "Pick the area (Empty)") + " and the plank collection"
         _set_hidden(set()); _GH.update(tris=None, lines=None)
         return
     _state["running"] = True
@@ -310,7 +310,7 @@ def compute(context, final=False):
         if pg.with_details and core.moved is not None:
             dl, dmsg = detale.DetailCore().run(context, pd, coll)
             msg += " | " + dmsg
-        pg.message = ("" if final else f"[podglad {time.time() - t0:.1f} s] ") + msg
+        pg.message = ("" if final else f"[preview {time.time() - t0:.1f} s] ") + msg
     finally:
         _state["running"] = False
         _state["last"] = time.time()
@@ -328,7 +328,7 @@ def _tick():
     try:
         compute(ctx)
     except Exception as e:                                   # podglad nie moze wywrocic Blendera
-        sc.deski_podglad.message = f"Blad podgladu: {e}"
+        sc.deski_podglad.message = f"Preview error: {e}"
         import traceback; traceback.print_exc()
     for a in ctx.screen.areas if ctx.screen else ():
         if a.type == 'VIEW_3D':
@@ -393,10 +393,10 @@ def _on_frame(scene, depsgraph=None):
 
 # ---------------------------------------------------------------- operatory
 class DESKI_OT_live_start(bpy.types.Operator):
-    bl_idname = "object.deski_podglad_start"
-    bl_label = "Podgląd na żywo"
-    bl_description = ("Wlacza podglad: kazda zmiana ustawien Wyrwania i Detali (albo przesuniecie terenu) "
-                      "od razu przelicza deski w jakosci szkicowej. Zatwierdz = wynik finalny, Anuluj = powrot")
+    bl_idname = "object.axis_rupture_podglad_start"
+    bl_label = "Live Preview"
+    bl_description = ("Turns on the preview: every change to the Tear and Details settings (or moving the terrain) "
+                      "instantly recomputes the planks in draft quality. Apply = final result, Cancel = revert")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -417,14 +417,14 @@ class DESKI_OT_live_start(bpy.types.Operator):
         pg.coll = coll
         pg.active = True
         compute(context)
-        self.report({'INFO'}, f"Podglad wlaczony ({n} desek zapamietanych). " + pg.message)
+        self.report({'INFO'}, f"Preview on ({n} planks stored). " + pg.message)
         return {'FINISHED'}
 
 
 class DESKI_OT_live_accept(bpy.types.Operator):
-    bl_idname = "object.deski_podglad_zatwierdz"
-    bl_label = "Zatwierdź"
-    bl_description = "Przelicza deski w pelnej jakosci (jak przyciski Wyrwij / Dodaj detale) i konczy podglad"
+    bl_idname = "object.axis_rupture_podglad_zatwierdz"
+    bl_label = "Apply"
+    bl_description = "Recomputes the planks in full quality (like the Tear / Add Details buttons) and ends the preview"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -446,9 +446,9 @@ class DESKI_OT_live_accept(bpy.types.Operator):
 
 
 class DESKI_OT_live_cancel(bpy.types.Operator):
-    bl_idname = "object.deski_podglad_anuluj"
+    bl_idname = "object.axis_rupture_podglad_anuluj"
     bl_label = "Anuluj"
-    bl_description = "Przywraca deski sprzed podgladu i konczy podglad"
+    bl_description = "Restores the planks from before the preview and ends the preview"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -461,9 +461,9 @@ class DESKI_OT_live_cancel(bpy.types.Operator):
 
 
 class DESKI_OT_live_refresh(bpy.types.Operator):
-    bl_idname = "object.deski_podglad_odswiez"
-    bl_label = "Przelicz"
-    bl_description = "Przelicza podglad teraz"
+    bl_idname = "object.axis_rupture_podglad_odswiez"
+    bl_label = "Recompute"
+    bl_description = "Recompute the preview now"
 
     @classmethod
     def poll(cls, context):
@@ -475,17 +475,17 @@ class DESKI_OT_live_refresh(bpy.types.Operator):
 
 
 class DeskiLiveSettings(bpy.types.PropertyGroup):
-    active: bpy.props.BoolProperty(name="Podglad aktywny", default=False)
-    mode: bpy.props.EnumProperty(name="Podglad", default='SZKIC', update=live_update, items=(
-        ('SZKIC', "Szkic", "Szybko: polprzezroczyste deski w kolorach stanu (zielona - przybita, zolta - jeden gwozdz, "
-                           "czerwona - wyrwana); prawdziwe siatki nietkniete, bez detali", 'SHADING_WIRE', 0),
-        ('PELNY', "Pełny", "Wolniej: prawdziwe siatki z petlami, bevelem i detalami", 'SHADING_TEXTURE', 1)))
-    auto: bpy.props.BoolProperty(name="Przeliczaj od razu", default=True,
-                                 description="Wylacz przy bardzo duzej liczbie desek - wtedy przycisk Przelicz")
-    with_details: bpy.props.BoolProperty(name="Z detalami", default=True, update=live_update,
-                                         description="Podglad obejmuje tez Detale (drzazgi, pekniecia, gwozdzie)")
-    message: bpy.props.StringProperty(name="Wynik")
-    coll: bpy.props.PointerProperty(name="Kolekcja sesji", type=bpy.types.Collection)
+    active: bpy.props.BoolProperty(name="Preview active", default=False)
+    mode: bpy.props.EnumProperty(name="Preview", default='SZKIC', update=live_update, items=(
+        ('SZKIC', "Draft", "Fast: semi-transparent planks in state colors (green - nailed, yellow - one nail, "
+                           "red - torn); real meshes untouched, no details", 'SHADING_WIRE', 0),
+        ('PELNY', "Full", "Slower: real meshes with loops, bevel and details", 'SHADING_TEXTURE', 1)))
+    auto: bpy.props.BoolProperty(name="Update Instantly", default=True,
+                                 description="Turn off for a very large number of planks - then use the Recompute button")
+    with_details: bpy.props.BoolProperty(name="With Details", default=True, update=live_update,
+                                         description="The preview also includes Details (splinters, cracks, nails)")
+    message: bpy.props.StringProperty(name="Result")
+    coll: bpy.props.PointerProperty(name="Session Collection", type=bpy.types.Collection)
 
 
 classes = (DeskiLiveSettings, DESKI_OT_live_start, DESKI_OT_live_accept, DESKI_OT_live_cancel, DESKI_OT_live_refresh)

@@ -1,20 +1,22 @@
-# Deski - dodatek do Blendera (4.2+ / 5.x)
-# przygotowanie.py - Przygotowanie desek: podzial plaszczyzny podlogi na deski wg szczelin na teksturze
-# wyrwanie.py      - Wyrwanie desek: wyginanie / wyrywanie przybitych desek przez teren
-# scenariusze.py   - scenariusze etapu 1: wilgoc (wybrzuszenie), zapadniecie (dziura), wybuch (krater)
-# detale.py        - Detale desek: nierownosci, drzazgi, odksztalcenie wyrwanych desek, gwozdzie
-# podglad.py       - Podglad na zywo: zmiany ustawien od razu widoczne, Zatwierdz = wynik finalny
-# animacja.py      - Animacja wyrywania: stan fizyczny w czasie -> klucze obiektow / absolutne shape keys
-# efekty.py        - efekty statyczne: pekajacy lod, odklejanie wykladziny
-# ui.py            - panele: 1 Przygotowanie, 2 Wyrwanie, 3 Detale (+ zwijane podpanele)
-# Uzycie: View3D > Sidebar (N) > zakladka "Deski"
+# Axis Rupture - Blender add-on (4.2+ / 5.x)
+# Splits floor, wall and roof planes into planks, tiles or bricks along seams detected on the texture,
+# then bends, tears and breaks them.
+# przygotowanie.py - Prepare: split a plane into separate pieces along texture seams (UVs preserved)
+# wyrwanie.py      - Tear: bend / tear nailed planks with a terrain or a scenario
+# scenariusze.py   - scenarios: moisture (bulge), collapse (hole), blast (crater)
+# detale.py        - Details: unevenness, splinters, cracks, nails, burn / rot
+# podglad.py       - Live Preview: setting changes recompute instantly, Apply = final result
+# animacja.py      - Animate tearing: object keys / absolute shape keys over time
+# efekty.py        - static effects: cracking ice, peeling carpet
+# ui.py            - panels: 1 Prepare, 2 Tear, 3 Details, 4 Effects
+# Usage: View3D > Sidebar (N) > "Axis Rupture" tab
 bl_info = {
-    "name": "Deski: wyrwanie przez teren",
-    "author": "Bella",
-    "version": (1, 1, 0),
+    "name": "Axis Rupture",
+    "author": "Patryk Malarczyk",
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar > Deski",
-    "description": "Przygotowanie desek z plaszczyzny podlogi i ich wyginanie / wyrywanie przez teren",
+    "location": "View3D > Sidebar > Axis Rupture",
+    "description": "Split floor, wall and roof planes into planks, tiles or bricks along texture seams, then bend, tear and break them",
     "category": "Object",
 }
 

@@ -156,7 +156,7 @@ def purge_orphans():
                     refs.add(json.loads(d)["mesh"])
                 except (ValueError, KeyError):
                     pass
-    pat = re.compile(r"_(Deska|Plytka|Cegla|Dachowka|Kostka|Kra)(\.\d+)?$")
+    pat = re.compile(r"_(Plank|Tile|Brick|RoofTile|Paver|Floe)(\.\d+)?$")
     dead = [m for m in bpy.data.meshes if m.use_fake_user and m.users == 1 and m.name not in refs and pat.search(m.name)]
     for m in dead:
         bpy.data.meshes.remove(m)
@@ -783,14 +783,14 @@ class DeformCore:
             if not (getattr(self, "keep_tb", False) and getattr(self, "TB", None) is not None):
                 self.terrain_bvh(context, terrain)
         elif p.emitter is None:
-            return None, 'ERROR', "Wskaz obiekt sterujacy scenariusza (Empty albo siatke)"
+            return None, 'ERROR', "Pick the scenario control object (Empty or mesh)"
         boards, skipped = [], []
         for o in (boards_in if boards_in is not None else coll.all_objects):
             if o.type != 'MESH' or o == terrain or o == p.emitter or not o.data.vertices:
                 continue
             mw0, me0 = orig_of(o)                      # zawsze od oryginalu (nie od poprzedniego wyniku)
             if me0.shape_keys or o.data.shape_keys or o.get("deski_anim_orig"):
-                skipped.append(o.name + " (shape keys / animacja)"); continue
+                skipped.append(o.name + " (shape keys / animation)"); continue
             bc = getattr(self, "board_cache", None)    # szkic: deski sie nie zmieniaja - uklad liczony raz
             b = bc.get(o.name) if bc is not None else None
             if b is not None:
@@ -805,8 +805,8 @@ class DeformCore:
             if b is None:
                 b = Board(o, mw0, me0)
                 if not b.flat or b.T < 1e-4:
-                    skipped.append(o.name + (" (nie lezy plasko - wyrwana wczesniej starsza wersja? 'Przywroc "
-                                             "oryginalne deski' nie zadziala bez oryginalu)" if not b.flat else " (brak grubosci)"))
+                    skipped.append(o.name + (" (not lying flat - torn earlier by an older version? 'Restore "
+                                             "Original Planks' will not work without the original)" if not b.flat else " (no thickness)"))
                     continue
                 b.setup(p.segment_length, p.nail_position)
                 if bc is not None:
@@ -814,7 +814,7 @@ class DeformCore:
                     bc[o.name] = b
             boards.append(b)
         if not boards:
-            return None, 'ERROR', "Brak desek do przetworzenia"
+            return None, 'ERROR', "No planks to process"
         if scen != 'TEREN':
             from . import scenariusze
             z0s = sorted(b.z0 for b in boards)
@@ -829,7 +829,7 @@ class DeformCore:
         if not moved:
             if scen == 'TEREN':
                 return None, 'WARNING', terrain_hint(context, terrain, boards)
-            return None, 'WARNING', "Scenariusz nie obejmuje zadnej deski (sprawdz polozenie i rozmiar obiektu sterujacego)"
+            return None, 'WARNING', "The scenario does not cover any plank (check the position and size of the control object)"
         EPS = self._eps = p.clearance
         thrown = [b for b in moved if b.phase == 4]
         moved = [b for b in moved if b.phase != 4]
@@ -916,7 +916,7 @@ class DeformCore:
             data = []
             for top, bot, rel in nails:
                 data += list(inv @ top) + list(inv @ bot) + [1.0 if rel else 0.0]
-            b.o["deski_faza"] = ("przybita", "jeden gwozdz", "wyrwana")[b.phase - 1]
+            b.o["deski_faza"] = ("przybita", "single nail", "wyrwana")[b.phase - 1]
             b.o["deski_gwozdzie"] = data                # [gora xyz, spod xyz, puscil] x 2, lokalnie
             b.o["deski_podloga"] = getattr(b, "floor", b.z0)   # najnizsze podparcie pod deska (swiat)
         n_settle = 0
@@ -927,20 +927,20 @@ class DeformCore:
         for b in thrown:                                # wyrzucone podmuchem: ukryte (do animacji / gruzu)
             b.o.hide_set(True); b.o.hide_render = True
             b.o["deski_faza"] = "wyrzucona"
-        msg = (f"Deski: {len(moved)} ruszone (proste: {stats['prosta']}, wygiete: {stats['wygieta']}), "
+        msg = (f"Planks: {len(moved)} moved (straight: {stats['prosta']}, bent: {stats['wygieta']}), "
                f"nietkniete: {len(boards) - len(moved) - len(thrown)}")
         if thrown:
-            msg += f", wyrzucone (ukryte): {len(thrown)}"
+            msg += f", ejected (hidden): {len(thrown)}"
         if n_settle:
-            msg += f", podniesione (kolizje): {n_settle}"
+            msg += f", lifted (collisions): {n_settle}"
         if skipped:
-            msg += f", pominiete: {len(skipped)}"
+            msg += f", skipped: {len(skipped)}"
         if p.verify:
             context.view_layer.update()
             bad, worst, tbad = self.verify(context, boards, {b.o.name for b in moved})
-            msg += f" | kontrola: przenikania deska-deska >2mm: {bad} (max {worst * 1000:.1f} mm), w terenie: {tbad}"
+            msg += f" | check: plank-plank intersections >2mm: {bad} (max {worst * 1000:.1f} mm), in terrain: {tbad}"
         for s in skipped:
-            print("Deski - pominieta:", s)
+            print("Planks - skipped:", s)
         return ('WARNING' if (skipped or (p.verify and (bad or tbad))) else 'INFO'), msg
 
 
@@ -957,8 +957,8 @@ def terrain_hint(context, terrain, boards):
     tb = _bbox_xy(tp)
     ov = bb[0] < tb[1] and tb[0] < bb[1] and bb[2] < tb[3] and tb[2] < bb[3]
     if ov:
-        return (f"Teren '{terrain.name}' lezy pod deskami, ale nie siega ponad podloge (najwyzej z={max(q.z for q in tp):.2f}, "
-                f"podloga z={z0:.2f}) - podnies teren albo przesun go w gore")
+        return (f"Terrain '{terrain.name}' lies under the planks but does not reach above the floor (highest z={max(q.z for q in tp):.2f}, "
+                f"floor z={z0:.2f}) - raise the terrain or move it up")
     board_objs = {b.o for b in boards}
     cands = []
     for o in context.scene.objects:
@@ -971,10 +971,10 @@ def terrain_hint(context, terrain, boards):
             area = (min(bb[1], ob[1]) - max(bb[0], ob[0])) * (min(bb[3], ob[3]) - max(bb[2], ob[2]))
             cands.append((area, o.name))
     cands.sort(reverse=True)
-    msg = (f"Teren '{terrain.name}' nie lezy pod deskami (deski: x {bb[0]:.1f}..{bb[1]:.1f}, y {bb[2]:.1f}..{bb[3]:.1f}; "
-           f"teren: x {tb[0]:.1f}..{tb[1]:.1f}, y {tb[2]:.1f}..{tb[3]:.1f})")
+    msg = (f"Terrain '{terrain.name}' does not lie under the planks (planks: x {bb[0]:.1f}..{bb[1]:.1f}, y {bb[2]:.1f}..{bb[3]:.1f}; "
+           f"terrain: x {tb[0]:.1f}..{tb[1]:.1f}, y {tb[2]:.1f}..{tb[3]:.1f})")
     if cands:
-        msg += " - pod deskami jest: " + ", ".join(n for _, n in cands[:3])
+        msg += " - under the planks there is: " + ", ".join(n for _, n in cands[:3])
     return msg
 
 
@@ -990,9 +990,9 @@ def remove_rigid_bodies(context, objs):
 
 
 class DESKI_OT_reset(bpy.types.Operator):
-    bl_idname = "object.deski_przywroc"
-    bl_label = "Przywróć oryginalne deski"
-    bl_description = "Cofa wyrwanie i detale: deski jak przed pierwszym wyrwaniem (gwozdzie i dno usuwane)"
+    bl_idname = "object.axis_rupture_przywroc"
+    bl_label = "Restore Original Planks"
+    bl_description = "Undoes tearing and details: planks as before the first tear (nails and bottom are removed)"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1005,17 +1005,17 @@ class DESKI_OT_reset(bpy.types.Operator):
         objs = [o for o in context.scene.deski_teren.boards.all_objects if o.type == 'MESH' and not o.get("deski_gwozdz")]
         n = reset_originals(context, objs)
         k = purge_orphans()
-        self.report({'INFO'} if n else {'WARNING'}, (f"Przywrocono {n} desek" if n else
-                    "Brak zapamietanych oryginalow (deski nie byly wyrywane ta wersja dodatku)")
-                    + (f"; usunieto {k} osieroconych kopii desek" if k else ""))
+        self.report({'INFO'} if n else {'WARNING'}, (f"Restored {n} planks" if n else
+                    "No stored originals (the planks were not torn with this version of the add-on)")
+                    + (f"; removed {k} orphaned plank copies" if k else ""))
         return {'FINISHED'}
 
 
 class DESKI_OT_deform(DeformCore, bpy.types.Operator):
-    bl_idname = "object.deski_teren_deform"
-    bl_label = "Wyrwij deski terenem"
-    bl_description = ("Wygina i wyrywa deski z kolekcji tak, jak zrobilby to teren wypychajacy "
-                      "je od spodu do swojej obecnej (docelowej) pozycji")
+    bl_idname = "object.axis_rupture_teren_deform"
+    bl_label = "Tear Planks with Terrain"
+    bl_description = ("Bends and tears the planks in the collection the way a terrain pushing "
+                      "them from below to its current (target) position would")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1052,74 +1052,74 @@ def mesh_poll(self, o):
 
 
 class DeskiSettings(bpy.types.PropertyGroup):
-    scenario: bpy.props.EnumProperty(name="Scenariusz", default='TEREN', items=(
-        ('TEREN', "Teren", "Teren w pozycji docelowej wypycha deski od spodu", 'MESH_GRID', 0),
-        ('WILGOC', "Wilgoć", "Wybrzuszenie od wilgoci: kopula / grzbiet pod deskami (Empty: srodek i promien, "
-                             "skala niejednorodna = elipsa / grzbiet)", 'MOD_FLUIDSIM', 1),
-        ('ZAPADNIECIE', "Zapadnięcie", "Dziura w podlodze: deski zwisaja z krawedzi albo wpadaja do srodka",
+    scenario: bpy.props.EnumProperty(name="Scenario", default='TEREN', items=(
+        ('TEREN', "Terrain", "Terrain in its target position pushes the planks from below", 'MESH_GRID', 0),
+        ('WILGOC', "Moisture", "Moisture bulge: a dome / ridge under the planks (Empty: center and radius, "
+                             "non-uniform scale = ellipse / ridge)", 'MOD_FLUIDSIM', 1),
+        ('ZAPADNIECIE', "Collapse", "Hole in the floor: planks hang from the edge or fall in",
          'SORT_DESC', 2),
-        ('WYBUCH', "Wybuch", "Krater i podmuch: deski odgiete w gore, najblizsze srodka wyrzucone", 'FORCE_FORCE', 3)))
-    emitter: bpy.props.PointerProperty(name="Obszar", type=bpy.types.Object,
-                                       description="Empty (srodek, promien = rozmiar Empty) albo siatka (obrys); "
-                                                   "przesuwanie / skalowanie widac od razu w Podgladzie na zywo")
-    bulge_height: bpy.props.FloatProperty(name="Wysokosc wybrzuszenia", default=0.08, min=0.0, unit='LENGTH')
-    hole_depth: bpy.props.FloatProperty(name="Glebokosc", default=0.35, min=0.0, unit='LENGTH',
-                                        description="Glebokosc dziury / krateru pod podloga")
-    hang_max: bpy.props.FloatProperty(name="Maks. zwis (st.)", default=65.0, min=0.0, max=89.0,
-                                      description="Najwiekszy kat, o jaki deska zlamana na krawedzi opada w dziure")
-    crater_size: bpy.props.FloatProperty(name="Krater (czesc promienia)", default=0.45, min=0.0, max=1.0,
+        ('WYBUCH', "Blast", "Crater and blast: planks bent upward, the ones nearest the center ejected", 'FORCE_FORCE', 3)))
+    emitter: bpy.props.PointerProperty(name="Area", type=bpy.types.Object,
+                                       description="Empty (center, radius = Empty size) or a mesh (outline); "
+                                                   "moving / scaling shows up instantly in Live Preview")
+    bulge_height: bpy.props.FloatProperty(name="Bulge Height", default=0.08, min=0.0, unit='LENGTH')
+    hole_depth: bpy.props.FloatProperty(name="Depth", default=0.35, min=0.0, unit='LENGTH',
+                                        description="Hole / crater depth below the floor")
+    hang_max: bpy.props.FloatProperty(name="Max. Sag (deg.)", default=65.0, min=0.0, max=89.0,
+                                      description="The largest angle a plank broken at the edge drops into the hole")
+    crater_size: bpy.props.FloatProperty(name="Crater (fraction of radius)", default=0.45, min=0.0, max=1.0,
                                          subtype='FACTOR')
-    blast_strength: bpy.props.FloatProperty(name="Sila podmuchu", default=1.0, min=0.0, max=3.0)
-    peel_max: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=70.0, min=0.0, max=89.0)
-    throw_zone: bpy.props.FloatProperty(name="Strefa wyrzucenia", default=0.3, min=0.0, max=1.0, subtype='FACTOR',
-                                        description="Deski, na ktore podmuch dziala silniej niz (1 - to), sa wyrzucone (ukryte)")
-    anim_step: bpy.props.IntProperty(name="Co ile klatek", default=2, min=1, max=20,
-                                     description="Probkowanie symulacji w czasie (pomiedzy - interpolacja liniowa)")
-    anim_loops: bpy.props.IntProperty(name="Petle animacji", default=4, min=0, max=16,
-                                      description="Dodatkowe rownomierne petle w deskach wyginanych w animacji "
-                                                  "(luk przesuwajacy sie po desce potrzebuje geometrii)")
-    make_ground: bpy.props.BoolProperty(name="Utworz dno dziury / krateru", default=True,
-                                        description="Siatka dna (ten sam ksztalt, o ktory opieraja sie deski) - obiekt "
-                                                    "'<kolekcja> - dno', podmieniany przy kazdym przeliczeniu")
-    terrain: bpy.props.PointerProperty(name="Teren", type=bpy.types.Object, poll=mesh_poll,
-                                       description="Teren w pozycji docelowej (wypycha deski od spodu)")
-    boards: bpy.props.PointerProperty(name="Deski", type=bpy.types.Collection,
-                                      description="Kolekcja z deskami (kazda deska osobnym obiektem)")
+    blast_strength: bpy.props.FloatProperty(name="Blast Strength", default=1.0, min=0.0, max=3.0)
+    peel_max: bpy.props.FloatProperty(name="Max. Bend (deg.)", default=70.0, min=0.0, max=89.0)
+    throw_zone: bpy.props.FloatProperty(name="Ejection Zone", default=0.3, min=0.0, max=1.0, subtype='FACTOR',
+                                        description="Planks hit by the blast harder than (1 - this) are ejected (hidden)")
+    anim_step: bpy.props.IntProperty(name="Frame Step", default=2, min=1, max=20,
+                                     description="Simulation sampling over time (in between - linear interpolation)")
+    anim_loops: bpy.props.IntProperty(name="Animation Loops", default=4, min=0, max=16,
+                                      description="Extra even loops in planks that bend during the animation "
+                                                  "(an arc moving along the plank needs geometry)")
+    make_ground: bpy.props.BoolProperty(name="Create Hole / Crater Bottom", default=True,
+                                        description="Bottom mesh (the same shape the planks rest on) - the object "
+                                                    "'<collection> - bottom', replaced on every recompute")
+    terrain: bpy.props.PointerProperty(name="Terrain", type=bpy.types.Object, poll=mesh_poll,
+                                       description="Terrain in its target position (pushes the planks from below)")
+    boards: bpy.props.PointerProperty(name="Planks", type=bpy.types.Collection,
+                                      description="Collection with the planks (each plank a separate object)")
     seed: bpy.props.IntProperty(name="Seed", default=11)
-    nail_position: bpy.props.FloatProperty(name="Gwozdzie od konca", default=0.1, min=0.02, max=0.45,
-                                           subtype='FACTOR', description="Polozenie gwozdzi jako ulamek dlugosci deski")
-    bulge_min: bpy.props.FloatProperty(name="Ugiecie min", default=0.03, min=0.0, unit='LENGTH')
-    bulge_max: bpy.props.FloatProperty(name="Ugiecie max", default=0.08, min=0.0, unit='LENGTH',
-                                       description="Max wybrzuszenie przybitej deski, po ktorym puszcza gwozdz")
-    slope_min: bpy.props.FloatProperty(name="Kat przy gwozdziu min", default=math.radians(18), subtype='ANGLE')
-    slope_max: bpy.props.FloatProperty(name="Kat przy gwozdziu max", default=math.radians(32), subtype='ANGLE')
-    angle2_min: bpy.props.FloatProperty(name="Kat zerwania 2. gwozdzia min", default=math.radians(22), subtype='ANGLE')
-    angle2_max: bpy.props.FloatProperty(name="Kat zerwania 2. gwozdzia max", default=math.radians(40), subtype='ANGLE')
-    segment_length: bpy.props.FloatProperty(name="Dlugosc segmentu", default=0.02, min=0.005, unit='LENGTH',
-                                            description="Gestosc ciec do obliczen wygiecia (zbedne petle sa potem usuwane)")
-    bevel_width: bpy.props.FloatProperty(name="Bevel: szerokosc (Offset)", default=0.25, min=0.001, unit='LENGTH',
-                                         description="Offset bevela petli zalamania. Automatycznie zmniejszany, "
-                                                     "zeby bevel nie nachodzil na sasiednia petle ani koniec deski")
-    bevel_segments: bpy.props.IntProperty(name="Bevel: segmenty", default=6, min=1, max=64)
-    steps: bpy.props.IntProperty(name="Kroki symulacji", default=120, min=10, max=2000)
-    clearance: bpy.props.FloatProperty(name="Luz", default=0.0015, min=0.0, unit='LENGTH')
-    roll_max: bpy.props.FloatProperty(name="Max skret w poprzek (st.)", default=35.0, min=0.0, max=60.0,
-                                      description="Deska przechyla sie w poprzek do spadku terenu tam, gdzie na nim lezy. 0 = bez skretu")
-    loop_tolerance: bpy.props.FloatProperty(name="Tolerancja petli", default=0.0005, min=0.00001, unit='LENGTH',
-                                            description="Petla zostaje tylko, jesli bez niej ksztalt deski zmienilby sie "
-                                                        "o wiecej niz tyle. Mniej = gladszy luk, wiecej petli")
-    smooth_shading: bpy.props.BoolProperty(name="Gladkie cieniowanie luku", default=True,
-                                           description="Wygiete deski: Shade Smooth, krawedzie deski (> 30 st.) ostre")
-    straight_tolerance: bpy.props.FloatProperty(name="Prosta ponizej (st.)", default=0.2, min=0.0,
-                                                description="Deska wygieta mniej niz tyle stopni zostaje nietknieta siatkowo")
-    remove_rigidbody: bpy.props.BoolProperty(name="Usun Rigid Body z desek", default=True)
-    resolve_collisions: bpy.props.BoolProperty(name="Rozsun kolizje", default=True,
-                                               description="Deski przenikajace sie po wyginaniu: swobodniejsza (mniej "
-                                                           "trzymajacych gwozdzi) jest podnoszona o glebokosc przenikania")
-    verify: bpy.props.BoolProperty(name="Sprawdz przenikania", default=True)
-    bend_min_length: bpy.props.FloatProperty(name="Min. dlugosc do giecia", default=0.6, min=0.0, unit='LENGTH',
-                                             description="Deski krotsze (np. klepki jodelki) sa sztywne: teren je podnosi "
-                                                         "i przechyla w calosci, bez wyginania i bez odksztalcen w Detalach")
+    nail_position: bpy.props.FloatProperty(name="Nails from End", default=0.1, min=0.02, max=0.45,
+                                           subtype='FACTOR', description="Nail position as a fraction of the plank length")
+    bulge_min: bpy.props.FloatProperty(name="Deflection Min", default=0.03, min=0.0, unit='LENGTH')
+    bulge_max: bpy.props.FloatProperty(name="Deflection Max", default=0.08, min=0.0, unit='LENGTH',
+                                       description="Max bulge of a nailed plank before the nail lets go")
+    slope_min: bpy.props.FloatProperty(name="Angle at Nail Min", default=math.radians(18), subtype='ANGLE')
+    slope_max: bpy.props.FloatProperty(name="Angle at Nail Max", default=math.radians(32), subtype='ANGLE')
+    angle2_min: bpy.props.FloatProperty(name="2nd Nail Break Angle Min", default=math.radians(22), subtype='ANGLE')
+    angle2_max: bpy.props.FloatProperty(name="2nd Nail Break Angle Max", default=math.radians(40), subtype='ANGLE')
+    segment_length: bpy.props.FloatProperty(name="Segment Length", default=0.02, min=0.005, unit='LENGTH',
+                                            description="Cut density for the bend computation (redundant loops are removed afterwards)")
+    bevel_width: bpy.props.FloatProperty(name="Bevel: Width (Offset)", default=0.25, min=0.001, unit='LENGTH',
+                                         description="Bevel offset of the bend loop. Reduced automatically "
+                                                     "so the bevel does not overlap the next loop or the plank end")
+    bevel_segments: bpy.props.IntProperty(name="Bevel: Segments", default=6, min=1, max=64)
+    steps: bpy.props.IntProperty(name="Simulation Steps", default=120, min=10, max=2000)
+    clearance: bpy.props.FloatProperty(name="Clearance", default=0.0015, min=0.0, unit='LENGTH')
+    roll_max: bpy.props.FloatProperty(name="Max Cross Twist (deg.)", default=35.0, min=0.0, max=60.0,
+                                      description="The plank tilts sideways to follow the terrain slope where it rests on it. 0 = no twist")
+    loop_tolerance: bpy.props.FloatProperty(name="Loop Tolerance", default=0.0005, min=0.00001, unit='LENGTH',
+                                            description="A loop stays only if removing it would change the plank shape "
+                                                        "by more than this. Lower = smoother arc, more loops")
+    smooth_shading: bpy.props.BoolProperty(name="Smooth Arc Shading", default=True,
+                                           description="Bent planks: Shade Smooth, plank edges (> 30 deg.) sharp")
+    straight_tolerance: bpy.props.FloatProperty(name="Straight Below (deg.)", default=0.2, min=0.0,
+                                                description="A plank bent less than this many degrees keeps its mesh untouched")
+    remove_rigidbody: bpy.props.BoolProperty(name="Remove Rigid Body from Planks", default=True)
+    resolve_collisions: bpy.props.BoolProperty(name="Separate Collisions", default=True,
+                                               description="Planks intersecting after bending: the looser one (fewer "
+                                                           "holding nails) is lifted by the intersection depth")
+    verify: bpy.props.BoolProperty(name="Check Intersections", default=True)
+    bend_min_length: bpy.props.FloatProperty(name="Min. Length to Bend", default=0.6, min=0.0, unit='LENGTH',
+                                             description="Shorter planks (e.g. herringbone blocks) are rigid: the terrain lifts "
+                                                         "and tilts them as a whole, with no bending and no deformation in Details")
 
 
 add_live_updates(DeskiSettings, skip=("boards", "remove_rigidbody", "anim_step", "anim_loops"))

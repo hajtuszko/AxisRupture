@@ -458,8 +458,8 @@ def herring_fit_iter(cache, img, p):
         if ("S", ik) not in cache or cache[("S", ik)][1] is None:
             res = 2048 if max(img.size) >= 2048 else 1024
             S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.6)
-            print("Przygotowanie desek - jodelka: mapy szczelin", used, "rozdzielczosc", res)
-            yield (0.62, "siatka desek (widmo)")
+            print("Prepare planks - herringbone: seam maps", used, "resolution", res)
+            yield (0.62, "plank grid (spectrum)")
             lat, _ = jd.detect_lattice(S)
             cache[("S", ik)] = (S, lat, jd.edge_scores(S, lat))
         S, lat, (E1, E2, org) = cache[("S", ik)]
@@ -471,9 +471,9 @@ def herring_fit_iter(cache, img, p):
         model = yield from _sub(jd.fit_iter(E1, E2, org, k, p.herr_length, var, off), 0.65, 0.9)
         field = None
         if p.herr_calibrate:
-            yield (0.92, "kalibracja lokalna szczelin")
+            yield (0.92, "local seam calibration")
             field = jd.calibrate(S, lat, model)
-            print("Przygotowanie desek - jodelka: kalibracja lokalna (px)", field["stats"])
+            print("Prepare planks - herringbone: local calibration (px)", field["stats"])
         cache[key] = (tuple(lat) + (field,), model, S.shape[::-1])
     return cache[key]
 
@@ -617,20 +617,20 @@ def straight_detect_iter(cache, img, p):
         res = 2048 if max(img.size) >= 2048 else 1024
         if ("S", ik) not in cache:
             S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.8)
-            print("Przygotowanie desek - proste: mapy szczelin", used, "rozdzielczosc", res)
+            print("Prepare planks - straight: seam maps", used, "rozdzielczosc", res)
             cache[("S", ik)] = (S, None, None)
         S = cache[("S", ik)][0]
-        yield (0.85, "szczeliny i laczenia")
+        yield (0.85, "seams and joints")
         # mapa szczelin: szczelina = jasny grzbiet -> dla wykrywania (ciemne linie) odwrocona
         axis, seams, bands = detect_planks(-S.astype(float), p.sensitivity, p.min_width, p.min_length,
                                            p.joint_cover, p.joint_contrast)
         size = (S.shape[1], S.shape[0])
         if p.straight_calibrate and len(seams) >= 2:
-            yield (0.92, "kalibracja lokalna szczelin")
+            yield (0.92, "local seam calibration")
             field = calibrate_straight(S, axis, seams, bands)
-            print("Przygotowanie desek - proste: kalibracja lokalna (px)", field.get("stats"))
+            print("Prepare planks - straight: local calibration (px)", field.get("stats"))
     else:
-        yield (0.5, "szczeliny (jasnosc)")
+        yield (0.5, "seams (brightness)")
         axis, seams, bands = detect_planks(image_luminance(img), p.sensitivity, p.min_width,
                                            p.min_length, p.joint_cover, p.joint_contrast)
     cache[key] = (axis, seams, bands, field, size)
@@ -763,10 +763,10 @@ def stones_detect_iter(cache, img, p):
     res = 1024
     if ("S1024", ik) not in cache:
         S, used = yield from _sub(jd.seam_map_iter(img, res), 0.0, 0.6)
-        print("Przygotowanie desek - kamienie: mapy szczelin", used)
+        print("Prepare planks - stones: seam maps", used)
         cache[("S1024", ik)] = S
     S = cache[("S1024", ik)].astype(np.float64)
-    yield (0.62, "obszary kamieni")
+    yield (0.62, "stone regions")
     inner = S < p.stone_sens
     for _ in range(2):                                   # erozja: slabe polaczenia miedzy kamieniami znikaja
         e = inner.copy()
@@ -777,10 +777,10 @@ def stones_detect_iter(cache, img, p):
     ids, counts = np.unique(lab[lab >= 0], return_counts=True)
     small = ids[counts < p.stone_min * res * res]
     lab[np.isin(lab, small)] = -1
-    yield (0.75, "fugi (rozrost obszarow)")
+    yield (0.75, "grout (region growing)")
     lab = _grow(lab, S)
     # obrysy na obrazie 3x3 (kamienie na brzegu kafla w calosci), wybierz kopie ze srodkiem w srodkowym kaflu
-    yield (0.82, "obrysy kamieni")
+    yield (0.82, "stone outlines")
     step = 2                                             # obrysy na 512 px (wystarczy, szybciej)
     lab2 = lab[::step, ::step]
     h2, w2 = lab2.shape
@@ -826,7 +826,7 @@ class JobOperator:
 
     def invoke(self, context, event):
         if JOB["running"]:
-            self.report({'WARNING'}, "Poprzednie zadanie jeszcze trwa"); return {'CANCELLED'}
+            self.report({'WARNING'}, "The previous task is still running"); return {'CANCELLED'}
         self._gen = self.job(context)
         JOB.update(running=True, frac=0.0, text="start", cancel=False, label=self.bl_label)
         wm = context.window_manager
@@ -846,7 +846,7 @@ class JobOperator:
         import time
         if event.type == 'ESC' or JOB["cancel"]:
             self._gen.close()
-            return self._finish(context, 'WARNING', f"{self.bl_label}: przerwano ({JOB['text']})")
+            return self._finish(context, 'WARNING', f"{self.bl_label}: cancelled ({JOB['text']})")
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
         t0 = time.time()
@@ -859,8 +859,8 @@ class JobOperator:
             return self._finish(context, lvl, msg)
         except Exception as e:
             import traceback; traceback.print_exc()
-            return self._finish(context, 'ERROR', f"{self.bl_label}: blad - {e}")
-        context.workspace.status_text_set(f"{self.bl_label}: {int(JOB['frac'] * 100)}% - {JOB['text']} (Esc = przerwij)")
+            return self._finish(context, 'ERROR', f"{self.bl_label}: error - {e}")
+        context.workspace.status_text_set(f"{self.bl_label}: {int(JOB['frac'] * 100)}% - {JOB['text']} (Esc = cancel)")
         _redraw(context)
         return {'RUNNING_MODAL'}
 
@@ -873,9 +873,9 @@ def _redraw(context):
 
 
 class DESKI_OT_job_cancel(bpy.types.Operator):
-    bl_idname = "object.deski_przerwij"
-    bl_label = "Przerwij"
-    bl_description = "Przerywa trwajace zadanie (zrobione deski zostaja)"
+    bl_idname = "object.axis_rupture_przerwij"
+    bl_label = "Cancel"
+    bl_description = "Cancels the running task (finished planks are kept)"
 
     def execute(self, context):
         JOB["cancel"] = True
@@ -894,10 +894,10 @@ def draw_job(layout, op_idname, icon, text=None):
 
 # ---------------------------------------------------------------- operator
 class DESKI_OT_split(JobOperator, bpy.types.Operator):
-    bl_idname = "object.deski_przygotuj"
-    bl_label = "Podziel na deski"
-    bl_description = ("Dzieli plaszczyzny z kolekcji na osobne deski wg szczelin wykrytych na teksturze "
-                      "(z zachowaniem UV), nadaje grubosc i wstawia do nowej kolekcji")
+    bl_idname = "object.axis_rupture_przygotuj"
+    bl_label = "Split into Planks"
+    bl_description = ("Splits the plane into separate planks along seams detected on the texture "
+                      "(UVs preserved), adds thickness and puts them in a new collection")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -909,8 +909,8 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         p = context.scene.deski_przygotowanie
         src_objs = [o for o in (p.source,) if o and o.type == 'MESH' and o.data.polygons and o.data.uv_layers]
         if not src_objs:
-            return 'ERROR', "Wskaz plaszczyzne (siatka z UV i tekstura desek)"
-        out = result_collection(context, p.output_name or (p.source.name + " - deski"), p.source.name, p.replace_output)
+            return 'ERROR', "Pick a plane (mesh with UVs and a plank texture)"
+        out = result_collection(context, p.output_name or (p.source.name + " - planks"), p.source.name, p.replace_output)
         total, msgs = 0, []
         cache = _CACHE
         _SKIP.update(n=0, w=0.0)
@@ -919,14 +919,14 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
             lo, mid, hi = si / ns, (si + 0.85) / ns, (si + 1) / ns        # analiza tekstury trwa najdluzej
             img = find_texture(src, p.texture)
             if img is None:
-                msgs.append(f"{src.name}: brak tekstury (wskaz ja w polu Tekstura)"); continue
+                msgs.append(f"{src.name}: no texture (set it in the Texture field)"); continue
             if img.size[0] == 0:
-                return 'ERROR', f"Nie mozna wczytac obrazu {img.name} ({img.filepath})"
+                return 'ERROR', f"Cannot load image {img.name} ({img.filepath})"
             if p.layout == 'IRREGULAR':
                 polys, size = yield from _sub(stones_detect_iter(cache, img, p), lo, mid)
                 n = yield from _sub(self.split_stones(src, out, polys, p), mid, hi)
                 total += n
-                msgs.append(f"{src.name}: {n} kamieni ({img.name}, w kaflu {len(polys)})")
+                msgs.append(f"{src.name}: {n} stones ({img.name}, per tile {len(polys)})")
                 if p.hide_source:
                     src.hide_set(True); src.hide_render = True
                 continue
@@ -934,39 +934,39 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                 grid, model, size = yield from _sub(herring_fit_iter(cache, img, p), lo, mid)
                 n = yield from _sub(self.split_herringbone(src, out, grid, model, size, p), mid, hi)
                 total += n
-                msgs.append(f"{src.name}: {n} desek jodelki ({img.name}, szerokosc {grid[2]:.1f} px, "
-                            f"dlugosc {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]})")
+                msgs.append(f"{src.name}: {n} herringbone planks ({img.name}, width {grid[2]:.1f} px, "
+                            f"length {model[1]} widths, variant {model[3]}, offset {model[2]})")
                 if p.hide_source:
                     src.hide_set(True); src.hide_render = True
                 continue
             axis, seams, bands, field, fsize = yield from _sub(straight_detect_iter(cache, img, p), lo, mid)
             if len(seams) < 2:
-                msgs.append(f"{src.name}: nie wykryto szczelin na {img.name}"); continue
+                msgs.append(f"{src.name}: no seams detected on {img.name}"); continue
             dots, cimg = [], None
             if p.detect_nails:
                 cimg = find_color_texture(src, p.nail_texture)
                 if cimg is not None and cimg.size[0] > 0:
                     nk = ("n", _img_key(cimg), p.nail_dark)
                     if nk not in cache:
-                        yield (mid, "gwozdzie na teksturze")
+                        yield (mid, "nails on texture")
                         cache[nk] = detect_nail_dots(cimg, dark_thr=p.nail_dark)
                     dots = cache[nk]
             n, nn = yield from _sub(self.split_object(context, src, out, axis, bands, p, dots,
                                                       warp=(lambda r, tl=0.0, f=field, z=fsize, st=min(b - a for a, b, _ in bands):
                                                             warp_rect(f, z, r, st, tl)) if field else None), mid, hi)
             total += n
-            msgs.append(f"{src.name}: {n} desek ({img.name}, szczelin {len(seams)}, os {axis})"
-                        + (f", gwozdzi {nn} ({cimg.name})" if p.detect_nails and cimg else
-                           (", gwozdzie: brak tekstury koloru" if p.detect_nails else "")))
+            msgs.append(f"{src.name}: {n} planks ({img.name}, seams {len(seams)}, axis {axis})"
+                        + (f", nails {nn} ({cimg.name})" if p.detect_nails and cimg else
+                           (", nails: no color texture" if p.detect_nails else "")))
             if p.hide_source:
                 src.hide_set(True); src.hide_render = True
         for m in msgs:
-            print("Przygotowanie desek -", m)
+            print("Prepare planks -", m)
         if _SKIP["n"]:
-            msgs.append(f"pominieto {_SKIP['n']} kawalkow wezszych niz 'Min. kawalek' ({p.min_piece * 100:.1f} cm; "
-                        f"najszerszy pominiety {_SKIP['w'] * 100:.1f} cm)"
-                        + (" - zmniejsz 'Min. kawalek' w Wymiarach desek" if not total else ""))
-        return ('INFO' if total else 'WARNING'), f"Utworzono {total} desek w kolekcji '{out.name}'. " + "; ".join(msgs)
+            msgs.append(f"skipped {_SKIP['n']} pieces narrower than 'Min. Piece' ({p.min_piece * 100:.1f} cm; "
+                        f"widest skipped {_SKIP['w'] * 100:.1f} cm)"
+                        + (" - lower 'Min. Piece' in Plank Dimensions" if not total else ""))
+        return ('INFO' if total else 'WARNING'), f"Created {total} planks in collection '{out.name}'. " + "; ".join(msgs)
 
     def split_stones(self, src, out, polys, p):
         """plaszczyzna -> kamienie: wielokaty z kafla powtorzone na kolejnych kaflach UV, cofniete o pol fugi"""
@@ -996,7 +996,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         count = 0
         for bi, q in enumerate(items):
             if bi % 10 == 0:
-                yield (bi / max(len(items), 1), f"kamienie {count} ({bi}/{len(items)})")
+                yield (bi / max(len(items), 1), f"stones {count} ({bi}/{len(items)})")
             q = _offset_in(ccw(q), g)
             pls = []
             for fuv, aff, mat in faces:
@@ -1018,7 +1018,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
                 faces.append(([tuple(uv[l].uv) for l in poly.loop_indices], aff[0], face_material(src, poly)))
         if not faces:
             return 0
-        yield (0.0, "uklad desek")
+        yield (0.0, "plank layout")
         # ile metrow ma jedna kratka (szerokosc deski) - do szczeliny miedzy deskami
         import numpy as np
         N1, N2, per = grid[:3]
@@ -1034,7 +1034,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         items = sorted(herring_layout(src, grid, model, size).items())
         for bi, (key, ((i0, i1, j0, j1), (du, dv))) in enumerate(items):
             if bi % 10 == 0:
-                yield (bi / max(len(items), 1), f"deski {count} (uklad {bi}/{len(items)})")
+                yield (bi / max(len(items), 1), f"planks {count} (layout {bi}/{len(items)})")
             quad = board_quad(grid, size, i0, i1, j0, j1, shrink, tol_uv)
             polys, along = [], None
             for fuv, f3, mat in faces:
@@ -1103,7 +1103,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
             edge_cache[(t, bi)] = res
             return res
 
-        yield (0.0, "podzial plaszczyzny")
+        yield (0.0, "plane split")
         for poly in me.polygons:
             aff = face_uv_affine(me, poly, uv)
             if aff is None:
@@ -1147,7 +1147,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         items = sorted(pieces.items())
         for bi, (key, polys) in enumerate(items):
             if bi % 10 == 0:
-                yield (0.1 + 0.9 * bi / max(len(items), 1), f"deski {bi}/{len(items)}")
+                yield (0.1 + 0.9 * bi / max(len(items), 1), f"planks {bi}/{len(items)}")
             res = self.make_board(src, out, polys, p, count + 1)
             if res is None:
                 continue
@@ -1233,7 +1233,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
             tset = set(tops)
             fix_side_uvs(bm, uvl, to_frame, tops, [f for f in bm.faces if f not in tset])
         bm.faces.ensure_lookup_table()
-        dm = bpy.data.meshes.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Deska')}")
+        dm = bpy.data.meshes.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Plank')}")
         bm.to_mesh(dm); bm.free()
         for mat in mats:
             dm.materials.append(mat)
@@ -1243,7 +1243,7 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
         vs = [v.co for v in dm.vertices]
         c = Vector([(min(v[k] for v in vs) + max(v[k] for v in vs)) / 2 for k in range(3)])
         dm.transform(Matrix.Translation(-c))
-        ob = bpy.data.objects.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Deska')}_{idx:03d}", dm)
+        ob = bpy.data.objects.new(f"{src.name}_{PIECE.get(getattr(p, 'surface', 'DESKI'), 'Plank')}_{idx:03d}", dm)
         ob.matrix_world = mw @ R.to_4x4() @ Matrix.Translation(c)
         out.objects.link(ob)
         return ob, R @ c
@@ -1281,8 +1281,8 @@ class DESKI_OT_split(JobOperator, bpy.types.Operator):
 
 
 # ---------------------------------------------------------------- ustawienia + panel
-PIECE = {"DESKI": "Deska", "PLYTKI": "Plytka", "CEGLY": "Cegla", "DACHOWKI": "Dachowka", "KOSTKA": "Kostka",
-         "LOD": "Kra"}
+PIECE = {"DESKI": "Plank", "PLYTKI": "Tile", "CEGLY": "Brick", "DACHOWKI": "RoofTile", "KOSTKA": "Paver",
+         "LOD": "Floe"}
 
 # presety powierzchni: grubosc, fuga, faza, gwozdzie, maks. dlugosc, min. dlugosc do giecia (etap 2)
 PRESETS = {
@@ -1323,93 +1323,93 @@ def _plane_poll(self, o):
 
 
 class DeskiPrepSettings(bpy.types.PropertyGroup):
-    surface: bpy.props.EnumProperty(name="Powierzchnia", default='DESKI', update=_apply_preset, items=(
-        ('DESKI', "Deski", "Deski / parkiet: przybite gwozdziami", 'MESH_PLANE', 0),
-        ('PLYTKI', "Płytki", "Plytki / kafle / kasetony: cienkie, szeroka fuga, bez gwozdzi", 'MESH_GRID', 1),
-        ('CEGLY', "Cegły", "Cegly / mur / panele: grube, fuga zaprawy", 'MOD_BUILD', 2),
-        ('DACHOWKI', "Dachówki", "Dachowki / gonty / pokrycie dachu", 'MOD_ARRAY', 3),
-        ('KOSTKA', "Kostka", "Kostka brukowa / plyty chodnikowe: grube, fazowane", 'SNAP_VOLUME', 4)),
-        description="Ustawia grubosc, fuge, faze i gwozdzie dla rodzaju powierzchni (mozna je potem zmienic)")
-    source: bpy.props.PointerProperty(name="Płaszczyzna", type=bpy.types.Object, poll=_plane_poll,
-                                      description="Płaszczyzna podłogi do podziału (siatka z UV i teksturą desek) - "
-                                                  "wybierz z listy albo pipetą w widoku")
-    texture: bpy.props.PointerProperty(name="Tekstura (opcj.)", type=bpy.types.Image,
-                                       description="Obraz do wykrycia szczelin. Puste = z materialu (AO/Cavity, potem Base Color)")
-    output_name: bpy.props.StringProperty(name="Kolekcja wynikowa", default="",
-                                          description="Puste = '<kolekcja> - deski'")
-    layout: bpy.props.EnumProperty(name="Uklad desek", default='STRAIGHT', items=(
-        ('STRAIGHT', "Rzędy", "Elementy w rzedach (deski, plytki, cegly): szczeliny wzdluz U lub V tekstury + laczenia"),
-        ('IRREGULAR', "Nieregularne", "Kamienie / bruk / kostka nieregularna: kazdy element wykryty jako obszar "
-                                      "otoczony fuga (dowolny ksztalt)"),
-        ('HERRINGBONE', "Jodełka (skośne)", "Skosne panele w jodelke: kat i szerokosc wykrywane z tekstury, "
-                                            "dlugosc deski podajesz recznie")))
-    herr_length: bpy.props.IntProperty(name="Dlugosc deski (w szerokosciach)", default=0, min=0, max=30,
-                                       description="Ile szerokosci deski ma jej dlugosc. 0 = dobierz z tekstury "
-                                                   "(najlepsze dopasowanie do szczelin, 3..12) - sprawdz Podgladem")
-    herr_variant: bpy.props.EnumProperty(name="Wariant wzoru", default='AUTO', items=(
-        ('AUTO', "Auto", "Dopasuj do tekstury"), ('A', "A", ""), ('B', "B (odbity)", ""),
-        ('C', "C (obrocony)", ""), ('D', "D (obrocony, odbity)", "")),
-        description="Orientacja jodelki. Gdy Auto nie trafia - przestaw i sprawdz Podgladem")
-    herr_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
-                                           description="Dopasuj kazda szczeline osobno (zdjecie nie jest idealna siatka): "
-                                                       "pewne szczeliny koryguja polozenie, slabo widoczne sa interpolowane")
-    herr_offset: bpy.props.IntProperty(name="Przesuniecie wzoru", default=-1, min=-1, max=60,
-                                       description="Numer przesuniecia jodelki (kolejne ustawienia wzoru na siatce). "
-                                                   "-1 = dopasuj do tekstury")
-    stone_sens: bpy.props.FloatProperty(name="Próg fugi", default=1.5, min=0.2, max=8.0,
-                                        description="Jak wyrazna musi byc fuga, by oddzielac kamienie. Mniej = wiecej, "
-                                                    "mniejszych kamieni")
-    stone_min: bpy.props.FloatProperty(name="Min. kamień", default=0.0006, min=0.00001, max=0.05, precision=5,
-                                       description="Mniejsze obszary (czesc kafla) sa doklejane do sasiadow")
-    stone_simplify: bpy.props.FloatProperty(name="Uproszczenie obrysu", default=1.2, min=0.3, max=6.0,
-                                            description="Tolerancja upraszczania obrysu (px mapy 512) - wiecej = mniej scian")
-    straight_method: bpy.props.EnumProperty(name="Wykrywanie", default='MAPS', items=(
-        ('MAPS', "Wszystkie mapy", "Szczeliny ze wszystkich map materialu (AO, Cavity, Roughness, Normal, wysokosc...) - "
-                                   "odporne na sloje i plamy"),
-        ('LUMA', "Jasność jednej mapy", "Poprzednia metoda: ciemne linie na jednej teksturze (AO / Base Color)")))
-    straight_calibrate: bpy.props.BoolProperty(name="Kalibracja lokalna", default=True,
-                                               description="Dopasuj kazda szczeline i kazde laczenie osobno (zdjecie nie "
-                                                           "jest idealna siatka). Tylko z metoda 'Wszystkie mapy'")
-    sensitivity: bpy.props.FloatProperty(name="Czulosc (odchylenia)", default=4.0, min=1.0, max=20.0,
-                                         description="Jak wyrazna musi byc ciemna linia, by uznac ja za szczeline. "
-                                                     "Mniej = wiecej szczelin")
-    min_width: bpy.props.FloatProperty(name="Min. szerokosc deski", default=0.015, min=0.001, max=0.5,
-                                       subtype='FACTOR', description="Jako ulamek szerokosci tekstury")
-    min_length: bpy.props.FloatProperty(name="Min. dlugosc deski", default=0.05, min=0.001, max=1.0,
-                                        subtype='FACTOR', description="Jako ulamek dlugosci tekstury")
-    joint_contrast: bpy.props.FloatProperty(name="Laczenia: kontrast", default=0.3, min=0.05, max=1.0,
-                                            description="Jak ciemna (wzgledem szczeliny miedzy deskami) musi byc "
-                                                        "poprzeczna linia konca deski. Mniej = wiecej laczen")
-    joint_cover: bpy.props.FloatProperty(name="Laczenia: pokrycie", default=0.6, min=0.1, max=1.0, subtype='FACTOR',
-                                         description="Jaka czesc szerokosci deski musi przecinac linia konca deski")
-    max_length: bpy.props.FloatProperty(name="Maks. dlugosc deski", default=2.5, min=0.0, unit='LENGTH',
-                                        description="Deski dluzsze niz tyle sa dzielone w proporcji 40/60 "
-                                                    "(naprzemiennie w sasiednich pasach). 0 = bez podzialu")
-    thickness: bpy.props.FloatProperty(name="Grubosc", default=0.012, min=0.0, unit='LENGTH',
-                                       description="Deska wyciagana w dol od plaszczyzny (gora zostaje na miejscu)")
-    gap: bpy.props.FloatProperty(name="Szczelina", default=0.001, min=0.0, unit='LENGTH',
-                                 description="Odstep miedzy sasiednimi deskami")
-    chamfer: bpy.props.FloatProperty(name="Faza gornej krawedzi", default=0.002, min=0.0, unit='LENGTH')
-    min_piece: bpy.props.FloatProperty(name="Min. kawalek", default=0.02, min=0.0, unit='LENGTH',
-                                       description="Pomijaj drzazgi wezsze niz tyle (przy brzegach plaszczyzny)")
-    hide_source: bpy.props.BoolProperty(name="Ukryj plaszczyzne zrodlowa", default=True)
-    replace_output: bpy.props.BoolProperty(name="Zastąp poprzedni wynik", default=True,
-                                           description="Ponowny podzial tej samej plaszczyzny zastepuje poprzednie elementy "
-                                                       "(zamiast tworzyc nowa kolekcje '.001' na starych)")
-    detect_nails: bpy.props.BoolProperty(name="Wykrywaj gwozdzie", default=True,
-                                         description="Lebki gwozdzi z tekstury koloru (ciemne, chlodne punkty parami przy "
-                                                     "krawedziach deski) - uzywane przy wyrywaniu i w detalach")
-    nail_texture: bpy.props.PointerProperty(name="Tekstura gwozdzi (opcj.)", type=bpy.types.Image,
-                                            description="Puste = Base Color z materialu")
-    nail_dark: bpy.props.FloatProperty(name="Gwozdzie: kontrast", default=0.08, min=0.01, max=0.5,
-                                       description="O ile lebek musi byc ciemniejszy od drewna obok. Mniej = wiecej gwozdzi")
+    surface: bpy.props.EnumProperty(name="Surface", default='DESKI', update=_apply_preset, items=(
+        ('DESKI', "Planks", "Planks / parquet: nailed down", 'MESH_PLANE', 0),
+        ('PLYTKI', "Tiles", "Tiles / coffers: thin, wide grout, no nails", 'MESH_GRID', 1),
+        ('CEGLY', "Bricks", "Bricks / masonry / panels: thick, mortar joints", 'MOD_BUILD', 2),
+        ('DACHOWKI', "Roof Tiles", "Roof tiles / shingles / roofing", 'MOD_ARRAY', 3),
+        ('KOSTKA', "Pavers", "Paving stones / pavement slabs: thick, bevelled", 'SNAP_VOLUME', 4)),
+        description="Sets thickness, grout, bevel and nails for the surface type (you can change them later)")
+    source: bpy.props.PointerProperty(name="Plane", type=bpy.types.Object, poll=_plane_poll,
+                                      description="Floor plane to split (mesh with UVs and a plank texture) - "
+                                                  "pick from the list or with the eyedropper in the viewport")
+    texture: bpy.props.PointerProperty(name="Texture (optional)", type=bpy.types.Image,
+                                       description="Image used to detect seams. Empty = from the material (AO/Cavity, then Base Color)")
+    output_name: bpy.props.StringProperty(name="Output Collection", default="",
+                                          description="Empty = '<collection> - planks'")
+    layout: bpy.props.EnumProperty(name="Plank Layout", default='STRAIGHT', items=(
+        ('STRAIGHT', "Rows", "Elements in rows (planks, tiles, bricks): seams along texture U or V + joints"),
+        ('IRREGULAR', "Irregular", "Stones / cobbles / irregular paving: each element detected as a region "
+                                      "surrounded by grout (any shape)"),
+        ('HERRINGBONE', "Herringbone (diagonal)", "Diagonal herringbone panels: angle and width detected from the texture, "
+                                            "plank length set by hand")))
+    herr_length: bpy.props.IntProperty(name="Plank Length (in widths)", default=0, min=0, max=30,
+                                       description="How many plank widths make up its length. 0 = pick from the texture "
+                                                   "(best fit to the seams, 3..12) - check with Preview")
+    herr_variant: bpy.props.EnumProperty(name="Pattern Variant", default='AUTO', items=(
+        ('AUTO', "Auto", "Fit to texture"), ('A', "A", ""), ('B', "B (mirrored)", ""),
+        ('C', "C (rotated)", ""), ('D', "D (rotated, mirrored)", "")),
+        description="Herringbone orientation. If Auto misses, change it and check with Preview")
+    herr_calibrate: bpy.props.BoolProperty(name="Local Calibration", default=True,
+                                           description="Fit every seam separately (a photo is not a perfect grid): "
+                                                       "confident seams correct the position, faint ones are interpolated")
+    herr_offset: bpy.props.IntProperty(name="Pattern Offset", default=-1, min=-1, max=60,
+                                       description="Herringbone offset index (successive pattern positions on the grid). "
+                                                   "-1 = fit to texture")
+    stone_sens: bpy.props.FloatProperty(name="Grout Threshold", default=1.5, min=0.2, max=8.0,
+                                        description="How distinct the grout must be to separate stones. Lower = more, "
+                                                    "smaller stones")
+    stone_min: bpy.props.FloatProperty(name="Min. Stone", default=0.0006, min=0.00001, max=0.05, precision=5,
+                                       description="Smaller regions (fraction of a tile) are merged into neighbours")
+    stone_simplify: bpy.props.FloatProperty(name="Outline Simplification", default=1.2, min=0.3, max=6.0,
+                                            description="Outline simplification tolerance (px of a 512 map) - higher = fewer faces")
+    straight_method: bpy.props.EnumProperty(name="Detection", default='MAPS', items=(
+        ('MAPS', "All Maps", "Seams from all material maps (AO, Cavity, Roughness, Normal, height...) - "
+                                   "robust to wood grain and stains"),
+        ('LUMA', "Single Map Brightness", "Previous method: dark lines on one texture (AO / Base Color)")))
+    straight_calibrate: bpy.props.BoolProperty(name="Local Calibration", default=True,
+                                               description="Fit every seam and every joint separately (a photo is not "
+                                                           "a perfect grid). Only with the 'All Maps' method")
+    sensitivity: bpy.props.FloatProperty(name="Sensitivity (deviations)", default=4.0, min=1.0, max=20.0,
+                                         description="How distinct a dark line must be to count as a seam. "
+                                                     "Lower = more seams")
+    min_width: bpy.props.FloatProperty(name="Min. Plank Width", default=0.015, min=0.001, max=0.5,
+                                       subtype='FACTOR', description="As a fraction of the texture width")
+    min_length: bpy.props.FloatProperty(name="Min. Plank Length", default=0.05, min=0.001, max=1.0,
+                                        subtype='FACTOR', description="As a fraction of the texture length")
+    joint_contrast: bpy.props.FloatProperty(name="Joints: Contrast", default=0.3, min=0.05, max=1.0,
+                                            description="How dark (relative to the seam between planks) the "
+                                                        "cross line at a plank end must be. Lower = more joints")
+    joint_cover: bpy.props.FloatProperty(name="Joints: Coverage", default=0.6, min=0.1, max=1.0, subtype='FACTOR',
+                                         description="How much of the plank width the end line must cross")
+    max_length: bpy.props.FloatProperty(name="Max. Plank Length", default=2.5, min=0.0, unit='LENGTH',
+                                        description="Planks longer than this are split 40/60 "
+                                                    "(alternating in neighbouring rows). 0 = no split")
+    thickness: bpy.props.FloatProperty(name="Thickness", default=0.012, min=0.0, unit='LENGTH',
+                                       description="Plank extruded downward from the plane (the top stays in place)")
+    gap: bpy.props.FloatProperty(name="Gap", default=0.001, min=0.0, unit='LENGTH',
+                                 description="Gap between neighbouring planks")
+    chamfer: bpy.props.FloatProperty(name="Top edge bevel", default=0.002, min=0.0, unit='LENGTH')
+    min_piece: bpy.props.FloatProperty(name="Min. Piece", default=0.02, min=0.0, unit='LENGTH',
+                                       description="Skip slivers narrower than this (at the plane edges)")
+    hide_source: bpy.props.BoolProperty(name="Hide source plane", default=True)
+    replace_output: bpy.props.BoolProperty(name="Replace Previous Result", default=True,
+                                           description="Splitting the same plane again replaces the previous pieces "
+                                                       "(instead of creating a new '.001' collection on top of the old ones)")
+    detect_nails: bpy.props.BoolProperty(name="Detect Nails", default=True,
+                                         description="Nail heads from the color texture (dark, cool dots in pairs near "
+                                                     "the plank edges) - used for tearing and details")
+    nail_texture: bpy.props.PointerProperty(name="Nail Texture (optional)", type=bpy.types.Image,
+                                            description="Empty = Base Color from the material")
+    nail_dark: bpy.props.FloatProperty(name="Nails: Contrast", default=0.08, min=0.01, max=0.5,
+                                       description="How much darker a nail head must be than the wood next to it. Lower = more nails")
 
 
 class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
-    bl_idname = "object.deski_podglad"
-    bl_label = "Podgląd podziału"
-    bl_description = ("Rysuje obrysy desek (wykryta jodelka) na plaszczyznach - do sprawdzenia dopasowania "
-                      "do tekstury przed cieciem. Obiekt 'Podglad podzialu' mozna potem usunac")
+    bl_idname = "object.axis_rupture_podglad"
+    bl_label = "Preview Split"
+    bl_description = ("Draws plank outlines (detected herringbone) on the planes - to check the fit "
+                      "to the texture before cutting. The 'Split Preview' object can be deleted afterwards")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1418,7 +1418,7 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
 
     def job(self, context):
         p = context.scene.deski_przygotowanie
-        old = bpy.data.objects.get("Podglad podzialu")
+        old = bpy.data.objects.get("Split Preview")
         if old:
             bpy.data.objects.remove(old)
         bm = bmesh.new()
@@ -1427,10 +1427,10 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
         for si, src in enumerate(srcs):
             img = find_texture(src, p.texture)
             if img is None or img.size[0] == 0:
-                info.append(f"{src.name}: brak tekstury"); continue
+                info.append(f"{src.name}: no texture"); continue
             grid, model, size = yield from _sub(herring_fit_iter(cache, img, p), si / len(srcs), (si + 0.9) / len(srcs))
-            info.append(f"{src.name}: dlugosc deski {model[1]} szer., wariant {model[3]}, przesuniecie {model[2]}, "
-                        f"zgodnosc {model[0]:.4f}")
+            info.append(f"{src.name}: plank length {model[1]} widths, variant {model[3]}, offset {model[2]}, "
+                        f"match {model[0]:.4f}")
             me = src.data; uv = me.uv_layers.active.data; mw = src.matrix_world
             for (i0, i1, j0, j1), _ in herring_layout(src, grid, model, size).values():
                 quad = board_quad(grid, size, i0, i1, j0, j1, 0.0)
@@ -1445,12 +1445,12 @@ class DESKI_OT_split_preview(JobOperator, bpy.types.Operator):
                     vs = [bm.verts.new(mw @ aff[0](u, v) + nrm * 0.002) for u, v in cl]
                     for k in range(len(vs)):
                         bm.edges.new((vs[k], vs[k - 1]))
-        me = bpy.data.meshes.new("Podglad podzialu")
+        me = bpy.data.meshes.new("Split Preview")
         bm.to_mesh(me); bm.free()
-        ob = bpy.data.objects.new("Podglad podzialu", me)
+        ob = bpy.data.objects.new("Split Preview", me)
         ob.show_in_front = True; ob.hide_render = True
         context.scene.collection.objects.link(ob)
-        return 'INFO', "; ".join(info) or "Brak plaszczyzn"
+        return 'INFO', "; ".join(info) or "No planes"
 
 
 classes = (DeskiPrepSettings, DESKI_OT_split, DESKI_OT_split_preview, DESKI_OT_job_cancel)

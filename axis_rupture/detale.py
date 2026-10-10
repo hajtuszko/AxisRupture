@@ -6,7 +6,7 @@ from mathutils.bvhtree import BVHTree
 from .przygotowanie import fit_top_uv, unfold_uv, top_outline
 from .wyrwanie import Settings
 
-NAIL_MESH = "Deski_Gwozdz"
+NAIL_MESH = "AxisRupture_Nail"
 
 
 # ---------------------------------------------------------------- uklad deski
@@ -336,9 +336,9 @@ def nail_mesh(p):
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     me = bpy.data.meshes.new(NAIL_MESH)
     bm.to_mesh(me); bm.free()
-    mat = bpy.data.materials.get("Deski_Gwozdz_Metal")
+    mat = bpy.data.materials.get("AxisRupture_NailMetal")
     if mat is None:                                    # prosty, ciemny, lekko skorodowany metal
-        mat = bpy.data.materials.new("Deski_Gwozdz_Metal")
+        mat = bpy.data.materials.new("AxisRupture_NailMetal")
         mat.use_nodes = True
         bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
         if bsdf:
@@ -424,21 +424,21 @@ class DetailCore:
             for o in boards:
                 if o.get("deski_gwozdzie") and not o.get("deski_gwozdzie_dodane"):
                     if nails_coll is None:
-                        nails_coll = bpy.data.collections.get(coll.name + " - gwozdzie")
+                        nails_coll = bpy.data.collections.get(coll.name + " - nails")
                         if nails_coll is None:
-                            nails_coll = bpy.data.collections.new(coll.name + " - gwozdzie")
+                            nails_coll = bpy.data.collections.new(coll.name + " - nails")
                             context.scene.collection.children.link(nails_coll)
                     rng = random.Random(p.seed * 104729 + zlib.crc32(o.name.encode()))
                     st["gwozdzie"] += self.nails(o, rng, p, nails_coll)
                     o["deski_gwozdzie_dodane"] = 1
-        msg = (f"Detale: nierownosci {st['nierownosci']}, drzazgi (konce) {st['drzazgi']}, "
-               f"odksztalcone {st['odksztalcone']}, pekniete {st['pekniete']}, gwozdzie {st['gwozdzie']}")
+        msg = (f"Details: unevenness {st['nierownosci']}, splinters (ends) {st['drzazgi']}, "
+               f"odksztalcone {st['odksztalcone']}, cracked {st['pekniete']}, nails {st['gwozdzie']}")
         if st["rozklad"]:
             msg += f", {'spalone' if p.decay_type == 'SPALENIE' else 'zbutwiale'} {st['rozklad']}"
         if reverted:
-            msg += f", cofniete (kolizja z sasiednia deska) {reverted}"
+            msg += f", reverted (collision with a neighbouring plank) {reverted}"
         if st["pominiete"]:
-            msg += f", pominiete (juz maja detale) {st['pominiete']}"
+            msg += f", skipped (already have details) {st['pominiete']}"
         return 'INFO', msg
 
     # --- kontrola: zmienione deski, ktore przenikaja sasiednie o wiecej niz 1 mm
@@ -689,10 +689,10 @@ class DetailCore:
 
 
 class DESKI_OT_details(DetailCore, bpy.types.Operator):
-    bl_idname = "object.deski_detale"
-    bl_label = "Dodaj detale"
-    bl_description = ("Nierownosci nietknietych desek, drzazgi i odksztalcenie wyrwanych desek, "
-                      "gwozdzie wyrwane razem z deskami")
+    bl_idname = "object.axis_rupture_detale"
+    bl_label = "Add Details"
+    bl_description = ("Unevenness of intact planks, splinters and deformation of torn planks, "
+                      "nails torn out with the planks")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -709,62 +709,62 @@ class DESKI_OT_details(DetailCore, bpy.types.Operator):
 
 # ---------------------------------------------------------------- ustawienia + panel
 class DeskiDetailSettings(bpy.types.PropertyGroup):
-    boards: bpy.props.PointerProperty(name="Deski", type=bpy.types.Collection,
-                                      description="Puste = kolekcja z panelu Wyrwanie desek")
+    boards: bpy.props.PointerProperty(name="Planks", type=bpy.types.Collection,
+                                      description="Empty = collection from the Tear Planks panel")
     seed: bpy.props.IntProperty(name="Seed", default=3)
-    use_jitter: bpy.props.BoolProperty(name="Nierownosci nietknietych desek", default=True)
-    jitter_lift: bpy.props.FloatProperty(name="Maks. uniesienie", default=0.002, min=0.0, unit='LENGTH')
-    jitter_tilt: bpy.props.FloatProperty(name="Maks. przechyl (st.)", default=0.3, min=0.0, max=5.0)
-    jitter_shift: bpy.props.FloatProperty(name="Maks. przesuniecie konca", default=0.0004, min=0.0, unit='LENGTH',
-                                          description="Obrot w poziomie: o tyle przesuwa sie koniec deski. "
-                                                      "Trzymaj ponizej polowy szczeliny miedzy deskami")
-    use_twist_nailed: bpy.props.BoolProperty(name="Zwichrowanie nietknietych desek", default=True)
-    twist_nailed: bpy.props.FloatProperty(name="Maks. skret (st.)", default=1.5, min=0.0, max=10.0,
-                                          description="Skret przybitej deski (unosza sie narozniki), 2 petle")
-    use_splinters: bpy.props.BoolProperty(name="Drzazgi na koncach wyrwanych desek", default=True)
-    splinter_chance: bpy.props.FloatProperty(name="Szansa na koniec", default=0.6, min=0.0, max=1.0, subtype='FACTOR')
-    splinter_depth: bpy.props.FloatProperty(name="Glebokosc", default=0.05, min=0.005, unit='LENGTH')
-    splinter_teeth_min: bpy.props.IntProperty(name="Zeby min", default=3, min=2, max=8)
-    splinter_teeth_max: bpy.props.IntProperty(name="Zeby max", default=5, min=2, max=8)
-    splinter_out: bpy.props.FloatProperty(name="Szansa na wystajaca drzazge", default=0.35, min=0.0, max=1.0,
+    use_jitter: bpy.props.BoolProperty(name="Unevenness of intact planks", default=True)
+    jitter_lift: bpy.props.FloatProperty(name="Max. Lift", default=0.002, min=0.0, unit='LENGTH')
+    jitter_tilt: bpy.props.FloatProperty(name="Max. Tilt (deg.)", default=0.3, min=0.0, max=5.0)
+    jitter_shift: bpy.props.FloatProperty(name="Max. End Offset", default=0.0004, min=0.0, unit='LENGTH',
+                                          description="Horizontal rotation: how far the plank end moves. "
+                                                      "Keep it below half of the gap between planks")
+    use_twist_nailed: bpy.props.BoolProperty(name="Warp of intact planks", default=True)
+    twist_nailed: bpy.props.FloatProperty(name="Max. Twist (deg.)", default=1.5, min=0.0, max=10.0,
+                                          description="Twist of a nailed plank (corners lift), 2 loops")
+    use_splinters: bpy.props.BoolProperty(name="Splinters at the ends of torn planks", default=True)
+    splinter_chance: bpy.props.FloatProperty(name="Chance per End", default=0.6, min=0.0, max=1.0, subtype='FACTOR')
+    splinter_depth: bpy.props.FloatProperty(name="Depth", default=0.05, min=0.005, unit='LENGTH')
+    splinter_teeth_min: bpy.props.IntProperty(name="Teeth Min", default=3, min=2, max=8)
+    splinter_teeth_max: bpy.props.IntProperty(name="Teeth Max", default=5, min=2, max=8)
+    splinter_out: bpy.props.FloatProperty(name="Chance of a Protruding Splinter", default=0.35, min=0.0, max=1.0,
                                           subtype='FACTOR')
-    use_warp: bpy.props.BoolProperty(name="Odksztalcenie wyrwanych desek", default=True)
-    warp_bow: bpy.props.FloatProperty(name="Wygiecie (dlugosci)", default=0.02, min=0.0, max=0.1, subtype='FACTOR',
-                                      description="Strzalka luku jako ulamek dlugosci deski")
-    warp_twist: bpy.props.FloatProperty(name="Skret (st.)", default=8.0, min=0.0, max=30.0)
-    warp_loops: bpy.props.IntProperty(name="Petle", default=4, min=0, max=12,
-                                      description="Ile petli wzdluz deski na odksztalcenie (malo = mniej poligonow)")
-    use_crack: bpy.props.BoolProperty(name="Pekniecia wyrwanych desek", default=True)
-    crack_chance: bpy.props.FloatProperty(name="Szansa", default=0.35, min=0.0, max=1.0, subtype='FACTOR')
-    crack_min_length: bpy.props.FloatProperty(name="Min. dlugosc deski", default=0.8, min=0.0, unit='LENGTH')
-    crack_angle: bpy.props.FloatProperty(name="Maks. odgiecie (st.)", default=12.0, min=0.0, max=60.0)
+    use_warp: bpy.props.BoolProperty(name="Deformation of torn planks", default=True)
+    warp_bow: bpy.props.FloatProperty(name="Bend (lengths)", default=0.02, min=0.0, max=0.1, subtype='FACTOR',
+                                      description="Arc height as a fraction of the plank length")
+    warp_twist: bpy.props.FloatProperty(name="Twist (deg.)", default=8.0, min=0.0, max=30.0)
+    warp_loops: bpy.props.IntProperty(name="Loops", default=4, min=0, max=12,
+                                      description="How many loops along the plank for deformation (fewer = fewer polygons)")
+    use_crack: bpy.props.BoolProperty(name="Cracks in torn planks", default=True)
+    crack_chance: bpy.props.FloatProperty(name="Chance", default=0.35, min=0.0, max=1.0, subtype='FACTOR')
+    crack_min_length: bpy.props.FloatProperty(name="Min. Plank Length", default=0.8, min=0.0, unit='LENGTH')
+    crack_angle: bpy.props.FloatProperty(name="Max. Bend (deg.)", default=12.0, min=0.0, max=60.0)
     crack_jag: bpy.props.FloatProperty(name="Poszarpanie", default=0.04, min=0.0, unit='LENGTH',
-                                       description="Jak daleko wzdluz deski biegnie poszarpana linia pekniecia")
-    use_nails: bpy.props.BoolProperty(name="Gwozdzie wyrwane z deskami", default=True)
-    nail_chance: bpy.props.FloatProperty(name="Szansa", default=0.8, min=0.0, max=1.0, subtype='FACTOR')
-    nail_length: bpy.props.FloatProperty(name="Dlugosc", default=0.05, min=0.01, unit='LENGTH')
-    nail_diameter: bpy.props.FloatProperty(name="Srednica", default=0.003, min=0.0005, unit='LENGTH')
-    nail_head: bpy.props.FloatProperty(name="Srednica lba", default=0.008, min=0.001, unit='LENGTH')
-    nail_tilt: bpy.props.FloatProperty(name="Maks. odchylenie (st.)", default=20.0, min=0.0, max=80.0)
-    use_decay: bpy.props.BoolProperty(name="Spalenie / zbutwienie", default=False)
-    decay_type: bpy.props.EnumProperty(name="Rodzaj", default='SPALENIE', items=(
-        ('SPALENIE', "Spalenie", "Zweglone, zjedzone krawedzie i konce, ciemny material"),
-        ('BUTWIENIE', "Zbutwienie", "Zmurszale krawedzie, szarozielony nalot")))
-    decay_mode: bpy.props.EnumProperty(name="Obszar", default='OBSZAR', items=(
-        ('OBSZAR', "Z obiektu", "Srodek i promien z Empty (brzeg poszarpany szumem)"),
-        ('LOSOWO', "Losowe plamy", "Plamy z szumu na calej podlodze")))
-    decay_source: bpy.props.PointerProperty(name="Zrodlo", type=bpy.types.Object,
-                                            description="Empty: srodek i promien (rozmiar Empty) obszaru")
-    decay_coverage: bpy.props.FloatProperty(name="Pokrycie", default=0.3, min=0.0, max=1.0, subtype='FACTOR')
-    decay_scale: bpy.props.FloatProperty(name="Skala plam", default=0.5, min=0.01, unit='LENGTH')
-    decay_erode: bpy.props.FloatProperty(name="Zjedzenie krawedzi", default=0.012, min=0.0, unit='LENGTH')
-    decay_thin: bpy.props.FloatProperty(name="Pocienienie", default=0.35, min=0.0, max=0.9, subtype='FACTOR')
-    decay_seg: bpy.props.FloatProperty(name="Gestosc petli", default=0.04, min=0.005, unit='LENGTH',
-                                       description="Odstep dodatkowych petli w strefie efektu (wiecej = gladsza "
-                                                   "krawedz, wiecej poligonow)")
-    decay_material: bpy.props.BoolProperty(name="Material z efektem (kopia)", default=True,
-                                           description="Deski w obszarze dostaja kopie materialu z przyciemnieniem "
-                                                       "wg atrybutu; oryginalny material bez zmian")
+                                       description="How far along the plank the jagged crack line runs")
+    use_nails: bpy.props.BoolProperty(name="Nails torn out with planks", default=True)
+    nail_chance: bpy.props.FloatProperty(name="Chance", default=0.8, min=0.0, max=1.0, subtype='FACTOR')
+    nail_length: bpy.props.FloatProperty(name="Length", default=0.05, min=0.01, unit='LENGTH')
+    nail_diameter: bpy.props.FloatProperty(name="Diameter", default=0.003, min=0.0005, unit='LENGTH')
+    nail_head: bpy.props.FloatProperty(name="Head Diameter", default=0.008, min=0.001, unit='LENGTH')
+    nail_tilt: bpy.props.FloatProperty(name="Max. Deviation (deg.)", default=20.0, min=0.0, max=80.0)
+    use_decay: bpy.props.BoolProperty(name="Burn / Rot", default=False)
+    decay_type: bpy.props.EnumProperty(name="Type", default='SPALENIE', items=(
+        ('SPALENIE', "Burn", "Charred, eaten edges and ends, dark material"),
+        ('BUTWIENIE', "Rot", "Rotten edges, grey-green coating")))
+    decay_mode: bpy.props.EnumProperty(name="Area", default='OBSZAR', items=(
+        ('OBSZAR', "From Object", "Center and radius from an Empty (edge frayed with noise)"),
+        ('LOSOWO', "Random Patches", "Noise patches across the whole floor")))
+    decay_source: bpy.props.PointerProperty(name="Source", type=bpy.types.Object,
+                                            description="Empty: center and radius (Empty size) of the area")
+    decay_coverage: bpy.props.FloatProperty(name="Coverage", default=0.3, min=0.0, max=1.0, subtype='FACTOR')
+    decay_scale: bpy.props.FloatProperty(name="Patch Scale", default=0.5, min=0.01, unit='LENGTH')
+    decay_erode: bpy.props.FloatProperty(name="Edge Erosion", default=0.012, min=0.0, unit='LENGTH')
+    decay_thin: bpy.props.FloatProperty(name="Thinning", default=0.35, min=0.0, max=0.9, subtype='FACTOR')
+    decay_seg: bpy.props.FloatProperty(name="Loop Density", default=0.04, min=0.005, unit='LENGTH',
+                                       description="Spacing of extra loops in the effect zone (more = smoother "
+                                                   "edge, more polygons)")
+    decay_material: bpy.props.BoolProperty(name="Effect Material (copy)", default=True,
+                                           description="Planks in the area get a copy of the material darkened "
+                                                       "by an attribute; the original material stays unchanged")
 
 
 from .wyrwanie import add_live_updates

@@ -113,7 +113,7 @@ def seam_map_iter(img, res=1024):
     normal_px = None
     n_maps = len(maps)
     for i_map, (key, path) in enumerate(maps.items()):
-        yield (i_map / n_maps, f"mapa {i_map + 1}/{n_maps}: {key}")
+        yield (i_map / n_maps, f"map {i_map + 1}/{n_maps}: {key}")
         try:
             im = bpy.data.images.load(path, check_existing=True)
         except RuntimeError:
@@ -132,7 +132,7 @@ def seam_map_iter(img, res=1024):
             continue
         used.append(key)
     if normal_px is not None:
-        yield (0.95, "mapa normalnych")
+        yield (0.95, "normal map")
         a, b = _normal_valley(normal_px, sig)
         if ev:                                                # konwencja Y: zgodna z pozostalymi mapami
             ref = np.average(ev, 0, weights=wts)
@@ -309,7 +309,7 @@ def fit_iter(E1, E2, origin, k, n_user=0, var_user=None, off_user=None):
     ns = [n_user] if n_user else range(k + 2, 12 * k + 1)
     vs = [var_user] if var_user else VARIANTS
     for i_var, var in enumerate(vs):
-        yield (i_var / len(vs), f"dopasowanie wzoru {i_var + 1}/{len(vs)}")
+        yield (i_var / len(vs), f"pattern fit {i_var + 1}/{len(vs)}")
         X, Y = _var_xy(I, J, var)
         for n in ns:
             offs = [off_user] if off_user else [(cx, cy) for cx in range(2 * n) for cy in range(2 * k)]
